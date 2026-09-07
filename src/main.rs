@@ -203,8 +203,39 @@ fn handle_dxl_message(topic: &str, msg: &DxlMessage, engine: &DetectionEngine) -
             let metadata = OcsfMetadata::default();
             
             if topic.contains("clientregistry/connect") || topic.contains("clientregistry/disconnect") {
-                let is_connect = topic.contains("connect");
-                let client_guid = value.get("clientGuid").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let is_connect = topic.ends_with("/connect");
+                let raw_client_guid = value.get("clientGuid").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let parts: Vec<&str> = raw_client_guid.split(':').collect();
+                let client_guid = parts[0].to_string();
+                let client_instance_guid = if parts.len() > 1 { Some(parts[1].to_string()) } else { None };
+
+                let mut src_endpoint = None;
+                if let Some(ip) = value.get("remoteAddress").and_then(|v| v.as_str()) {
+                    let clean_ip = ip.strip_prefix("::ffff:").unwrap_or(ip);
+                    src_endpoint = Some(crate::ocsf::OcsfEndpoint {
+                        uid: None,
+                        ip: Some(clean_ip.to_string()),
+                    });
+                }
+
+                let mut tls = None;
+                if let (Some(ver), Some(cipher)) = (value.get("tlsVersion").and_then(|v| v.as_str()), value.get("cipher").and_then(|v| v.as_str())) {
+                    let cert = value.get("certThumbprint").and_then(|v| v.as_str()).map(|f| crate::ocsf::OcsfCertificate {
+                        fingerprint: f.to_string(),
+                    });
+                    tls = Some(crate::ocsf::OcsfTls {
+                        version: ver.to_string(),
+                        cipher_suites: vec![cipher.to_string()],
+                        certificate: cert,
+                    });
+                }
+
+                let mut connection_info = None;
+                if let Some(proto) = value.get("protocol").and_then(|v| v.as_str()) {
+                    connection_info = Some(crate::ocsf::OcsfConnectionInfo {
+                        protocol_name: proto.to_string(),
+                    });
+                }
                 
                 let na = NetworkActivity {
                     activity_id: if is_connect { 1 } else { 2 },
@@ -219,8 +250,11 @@ fn handle_dxl_message(topic: &str, msg: &DxlMessage, engine: &DetectionEngine) -
                     type_uid: if is_connect { 400101 } else { 400102 },
                     type_name: if is_connect { "Network Connect".to_string() } else { "Network Disconnect".to_string() },
                     metadata,
-                    src_endpoint: None,
-                    client_guid: client_guid.to_string(),
+                    src_endpoint,
+                    tls,
+                    connection_info,
+                    client_guid,
+                    client_instance_guid,
                 };
                 return Some(OcsfEvent::NetworkActivity(na));
                 

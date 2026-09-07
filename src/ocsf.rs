@@ -44,12 +44,36 @@ pub struct NetworkActivity {
     
     // Custom context
     pub src_endpoint: Option<OcsfEndpoint>,
-    pub client_guid: String,
+    pub tls: Option<OcsfTls>,
+    pub connection_info: Option<OcsfConnectionInfo>,
+    pub client_guid: String, // Split out (thumbprint)
+    pub client_instance_guid: Option<String>, // Full value
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OcsfEndpoint {
-    pub uid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OcsfTls {
+    pub version: String,
+    pub cipher_suites: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<OcsfCertificate>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OcsfCertificate {
+    pub fingerprint: String, // thumbprint
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OcsfConnectionInfo {
+    pub protocol_name: String,
 }
 
 // 6003 API Activity (Register / Unregister)
@@ -111,6 +135,7 @@ pub struct DetectionFinding {
     pub metadata: OcsfMetadata,
     
     pub finding_info: OcsfFindingInfo,
+    pub suser: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -173,7 +198,10 @@ mod tests {
             type_name: "Network Connect".to_string(),
             metadata: OcsfMetadata::default(),
             src_endpoint: None,
+            tls: None,
+            connection_info: None,
             client_guid: "test-guid".to_string(),
+            client_instance_guid: None,
         };
 
         let event = OcsfEvent::NetworkActivity(na);

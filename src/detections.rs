@@ -40,9 +40,35 @@ impl DetectionEngine {
         let metadata = OcsfMetadata::default();
 
         // (b) Unknown Thumbprint
-        if topic.ends_with("/register") {
-            if let Some(certs) = payload.get("certificates").and_then(|v| v.as_array())
-                && !self.allowed_thumbprints.is_empty() {
+        if !self.allowed_thumbprints.is_empty() {
+            // Check Connect events
+            if topic.ends_with("/connect")
+                && let Some(cert_str) = payload.get("certThumbprint").and_then(|v| v.as_str())
+                    .or_else(|| payload.get("clientGuid").and_then(|v| v.as_str()).map(|g| g.split(':').next().unwrap_or(g)))
+                    && !self.allowed_thumbprints.contains(&cert_str.to_string()) {
+                        alerts.push(Self::build_detection(
+                            now,
+                            &metadata,
+                            "Unknown Certificate Thumbprint",
+                            &format!("Client connected with unknown thumbprint: {}", cert_str),
+                            Some(cert_str.to_string()),
+                        ));
+                    }
+
+            // Check publishers (ignore known brokers)
+            if !self.brokers.contains_key(source_client_id) && !source_client_id.is_empty()
+                && !self.allowed_thumbprints.contains(&source_client_id.to_string()) {
+                    alerts.push(Self::build_detection(
+                        now,
+                        &metadata,
+                        "Unknown Certificate Thumbprint",
+                        &format!("Publisher with unknown thumbprint: {}", source_client_id),
+                        Some(source_client_id.to_string()),
+                    ));
+                }
+
+            if topic.ends_with("/register")
+                && let Some(certs) = payload.get("certificates").and_then(|v| v.as_array()) {
                     for cert in certs {
                         if let Some(cert_str) = cert.as_str()
                             && !self.allowed_thumbprints.contains(&cert_str.to_string()) {
@@ -51,12 +77,30 @@ impl DetectionEngine {
                                     &metadata,
                                     "Unknown Certificate Thumbprint",
                                     &format!("Service registered with unknown thumbprint: {}", cert_str),
+                                    Some(cert_str.to_string()),
                                 ));
                             }
                     }
                 }
+        }
+        
+        // (f) Legacy Cipher Suite
+        if topic.ends_with("/connect")
+            && let Some(cipher) = payload.get("cipher").and_then(|v| v.as_str())
+                && cipher.starts_with("TLS_RSA_") && !cipher.contains("ECDHE") {
+                    let thumbprint = payload.get("certThumbprint").and_then(|v| v.as_str())
+                        .or_else(|| payload.get("clientGuid").and_then(|v| v.as_str()).map(|g| g.split(':').next().unwrap_or(g)));
+                    alerts.push(Self::build_detection(
+                        now,
+                        &metadata,
+                        "Legacy Cipher Suite",
+                        &format!("Client connected with weak legacy cipher: {}", cipher),
+                        thumbprint.map(|s| s.to_string()),
+                    ));
+                }
 
-            // Track for TTL (a)
+        // Track for TTL (a)
+        if topic.ends_with("/register") {
             if let (Some(guid), Some(svc_type), Some(ttl), Some(reg_time)) = (
                 payload.get("serviceGuid").and_then(|v| v.as_str()),
                 payload.get("serviceType").and_then(|v| v.as_str()),
@@ -85,6 +129,7 @@ impl DetectionEngine {
                     &metadata,
                     "Sensitive Topic Published",
                     &format!("Client {} published to sensitive topic {}", source_client_id, topic),
+                    Some(source_client_id.to_string()),
                 ));
             }
         }
@@ -102,6 +147,7 @@ impl DetectionEngine {
                 &metadata,
                 "Fabric Change Detected",
                 "A fabric topology change or broker state change was detected.",
+                None,
             ));
         }
 
@@ -126,6 +172,7 @@ impl DetectionEngine {
                         &metadata,
                         "Service TTL Expired",
                         &format!("Service {} ({}) TTL expired without unregister", state.guid, state.service_type),
+                        None,
                     ));
                     state.reported = true;
                 }
@@ -151,12 +198,13 @@ impl DetectionEngine {
                 metadata,
                 title,
                 &format!("High rate detected for {}", key),
+                None,
             ));
             entry.clear(); // Debounce
         }
     }
 
-    fn build_detection(time: i64, metadata: &OcsfMetadata, title: &str, desc: &str) -> OcsfEvent {
+    fn build_detection(time: i64, metadata: &OcsfMetadata, title: &str, desc: &str, suser: Option<String>) -> OcsfEvent {
         OcsfEvent::DetectionFinding(DetectionFinding {
             activity_id: 1,
             activity_name: "Create".to_string(),
@@ -174,6 +222,7 @@ impl DetectionEngine {
                 title: title.to_string(),
                 desc: desc.to_string(),
             },
+            suser,
         })
     }
 
@@ -236,7 +285,7 @@ mod tests {
             "registrationTime": now_secs - 1000 // Expired > (10 + 5) * 60 = 900
         });
 
-        engine.process_event("/mcafee/event/dxl/svcregistry/register", &payload, "client-id");
+        engine.process_event("/mcafee/event/dxl/svcregistry/register", &payload, "allowed_hash");
         
         let alerts = engine.poll_timeouts();
         assert_eq!(alerts.len(), 1);
@@ -258,7 +307,7 @@ mod tests {
             "registrationTime": Utc::now().timestamp()
         });
 
-        let alerts = engine.process_event("/mcafee/event/dxl/svcregistry/register", &payload, "client-id");
+        let alerts = engine.process_event("/mcafee/event/dxl/svcregistry/register", &payload, "allowed_hash");
         assert_eq!(alerts.len(), 1);
     }
 
@@ -281,7 +330,7 @@ mod tests {
     fn test_sensitive_topic() {
         let mut engine = DetectionEngine::new(&test_config());
         let payload = json!({});
-        let alerts = engine.process_event("/mcafee/service/tie/file/reputation", &payload, "client-id");
+        let alerts = engine.process_event("/mcafee/service/tie/file/reputation", &payload, "allowed_hash");
         assert_eq!(alerts.len(), 1);
         if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
             assert_eq!(df.finding_info.title, "Sensitive Topic Published");
@@ -297,7 +346,7 @@ mod tests {
         let mut alerts = Vec::new();
         // Send 101 events in quick succession
         for _ in 0..101 {
-            let res = engine.process_event("/some/normal/topic", &payload, "client-id");
+            let res = engine.process_event("/some/normal/topic", &payload, "allowed_hash");
             alerts.extend(res);
         }
         // At 101st event, rate anomaly should trigger for client and topic
@@ -308,10 +357,39 @@ mod tests {
     fn test_fabric_change() {
         let mut engine = DetectionEngine::new(&test_config());
         let payload = json!({});
-        let alerts = engine.process_event("/mcafee/event/dxl/fabricchange", &payload, "client-id");
+        let alerts = engine.process_event("/mcafee/event/dxl/fabricchange", &payload, "allowed_hash");
         assert_eq!(alerts.len(), 1);
         if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
             assert_eq!(df.finding_info.title, "Fabric Change Detected");
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+    }
+
+    #[test]
+    fn test_legacy_cipher_suite() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let payload = json!({
+            "cipher": "TLS_RSA_WITH_AES_256_GCM_SHA384"
+        });
+        let alerts = engine.process_event("/mcafee/event/dxl/clientregistry/connect", &payload, "allowed_hash");
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Legacy Cipher Suite");
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+    }
+
+    #[test]
+    fn test_publisher_unknown_thumbprint() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let payload = json!({});
+        // Publish to a normal topic with an unknown client id
+        let alerts = engine.process_event("/some/normal/topic", &payload, "unknown_client");
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Unknown Certificate Thumbprint");
         } else {
             panic!("Expected DetectionFinding");
         }
