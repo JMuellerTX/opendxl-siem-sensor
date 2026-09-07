@@ -27,11 +27,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting OpenDXL SIEM Sensor v1 (Rust)");
 
     let config_path = std::env::args().nth(1).unwrap_or_else(|| {
-        "c:/src/opendxl/_local_verify/gemini-sensor-config/dxlclient.config".to_string()
+        std::env::var("DXL_CONFIG").unwrap_or_else(|_| {
+            eprintln!("Error: DXL_CONFIG environment variable not set and no config path provided via CLI");
+            std::process::exit(2);
+        })
     });
     info!("Loading config from: {}", config_path);
     
-    let config = DxlConfig::load(config_path).expect("Failed to load config");
+    let config = DxlConfig::load(&config_path).unwrap_or_else(|e| {
+        eprintln!("Error: Failed to load config file at '{}': {}", config_path, e);
+        std::process::exit(2);
+    });
     let broker = config.brokers.first().expect("No brokers configured");
     
     let mut mqttoptions = build_mqtt_options(
@@ -58,10 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     client.subscribe("/mcafee/event/dxl/#", QoS::AtMostOnce).await?;
     
+    let svc_query_msg_id = Uuid::new_v4().to_string();
     let svc_query_msg = DxlMessage {
         version: 3,
         message_type: MESSAGE_TYPE_REQUEST,
-        message_id: Uuid::new_v4().to_string(),
+        message_id: svc_query_msg_id.clone(),
         source_client_id: config.client_id.clone(),
         source_broker_id: "".to_string(),
         broker_ids: vec![],
@@ -82,9 +89,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.publish("/mcafee/service/dxl/svcregistry/query", QoS::AtMostOnce, false, encoded_svc_query).await?;
     info!("Sent svcregistry/query");
 
+    let broker_query_msg_id = Uuid::new_v4().to_string();
     let broker_query_msg = DxlMessage {
-        message_id: Uuid::new_v4().to_string(),
-        ..svc_query_msg
+        message_id: broker_query_msg_id.clone(),
+        ..svc_query_msg.clone()
     };
     let encoded_broker_query = encode_dxl_message(&broker_query_msg)?;
     client.publish("/mcafee/service/dxl/brokerregistry/query", QoS::AtMostOnce, false, encoded_broker_query).await?;
@@ -104,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             info!("Decoded DXL Message: ID={} Type={}", msg.message_id, msg.message_type);
                             
                             // Normalise and Detect
-                            if let Some(ocsf_event) = handle_dxl_message(&publish.topic, &msg) {
+                            if let Some(ocsf_event) = handle_dxl_message(&publish.topic, &msg, &detection_engine) {
                                 let cef_str = format_cef(&ocsf_event);
                                 println!("Syslog Output (Normal): {}", cef_str);
                                 
@@ -120,24 +128,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             
                             // Feed into Detection Engine if payload is JSON
-                            if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
-                                if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
-                                    let alerts = detection_engine.process_event(&publish.topic, &value, &msg.source_client_id);
-                                    for alert in alerts {
-                                        let cef_str = format_cef(&alert);
-                                        println!("Syslog Output (Detection): {}", cef_str);
-                                        if let Some(tx) = &syslog_tx {
-                                            let _ = tx.send(cef_str).await;
-                                        }
-                                        if let Some(tx) = &http_tx {
-                                            let _ = tx.send(alert.clone()).await;
-                                        }
-                                        if let Some(tx) = &kafka_tx {
-                                            let _ = tx.send(alert).await;
+                            if let Ok(json_str) = std::str::from_utf8(&msg.payload)
+                                && let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                    if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE && msg.request_message_id.as_ref() == Some(&svc_query_msg_id) {
+                                        detection_engine.process_sync_response(&value);
+                                        info!("Processed svcregistry/query sync response. Loaded {} services.", detection_engine.services.len());
+                                    } else if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE && msg.request_message_id.as_ref() == Some(&broker_query_msg_id) {
+                                        detection_engine.process_broker_sync_response(&value);
+                                        info!("Processed brokerregistry/query sync response. Loaded {} brokers.", detection_engine.brokers.len());
+                                    } else {
+                                        let alerts = detection_engine.process_event(&publish.topic, &value, &msg.source_client_id);
+                                        for alert in alerts {
+                                            let cef_str = format_cef(&alert);
+                                            println!("Syslog Output (Detection): {}", cef_str);
+                                            if let Some(tx) = &syslog_tx {
+                                                let _ = tx.send(cef_str).await;
+                                            }
+                                            if let Some(tx) = &http_tx {
+                                                let _ = tx.send(alert.clone()).await;
+                                            }
+                                            if let Some(tx) = &kafka_tx {
+                                                let _ = tx.send(alert).await;
+                                            }
                                         }
                                     }
                                 }
-                            }
                         }
                         Err(e) => {
                             error!("Failed to decode DXL message: {}", e);
@@ -181,9 +196,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn handle_dxl_message(topic: &str, msg: &DxlMessage) -> Option<OcsfEvent> {
-    if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
+fn handle_dxl_message(topic: &str, msg: &DxlMessage, engine: &DetectionEngine) -> Option<OcsfEvent> {
+    if let Ok(json_str) = std::str::from_utf8(&msg.payload)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
             let now = Utc::now().timestamp_millis();
             let metadata = OcsfMetadata::default();
             
@@ -210,9 +225,13 @@ fn handle_dxl_message(topic: &str, msg: &DxlMessage) -> Option<OcsfEvent> {
                 return Some(OcsfEvent::NetworkActivity(na));
                 
             } else if topic.contains("svcregistry/register") || topic.contains("svcregistry/unregister") {
-                let is_register = topic.contains("register");
+                let is_register = topic.ends_with("/register");
                 let service_guid = value.get("serviceGuid").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let service_type = value.get("serviceType").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let service_type = if is_register {
+                    value.get("serviceType").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string())
+                } else {
+                    engine.get_service_name(service_guid).unwrap_or_else(|| "unknown".to_string())
+                };
                 let client_guid = value.get("clientGuid").and_then(|v| v.as_str());
 
                 let actor = client_guid.map(|guid| OcsfActor {
@@ -242,14 +261,9 @@ fn handle_dxl_message(topic: &str, msg: &DxlMessage) -> Option<OcsfEvent> {
                     actor,
                 };
                 return Some(OcsfEvent::ApiActivity(aa));
-            } else if topic.contains("svcregistry/query") && msg.message_type == dxl::MESSAGE_TYPE_RESPONSE {
-                info!("Received svcregistry/query response, to be normalized");
-            } else if topic.contains("brokerregistry/query") && msg.message_type == dxl::MESSAGE_TYPE_RESPONSE {
-                info!("Received brokerregistry/query response");
-            } else {
+            } else if !topic.starts_with("/mcafee/client/") {
                 info!("Ignored event on topic {}", topic);
             }
         }
-    }
     None
 }

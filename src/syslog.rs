@@ -68,3 +68,26 @@ pub async fn start_syslog_sender(config: &DxlConfig) -> Option<mpsc::Sender<Stri
     
     Some(tx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_syslog_sender_no_host() {
+        let config = DxlConfig::default();
+        let tx = start_syslog_sender(&config).await;
+        assert!(tx.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_syslog_sender_with_host() {
+        let config = DxlConfig {
+            syslog_host: Some("127.0.0.1".to_string()),
+            syslog_protocol: Some("udp".to_string()),
+            ..Default::default()
+        };
+        let tx = start_syslog_sender(&config).await;
+        assert!(tx.is_some());
+    }
+}

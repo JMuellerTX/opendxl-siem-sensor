@@ -276,7 +276,9 @@ mod tests {
 
     #[test]
     fn test_golden_vectors() {
-        let file = File::open("c:/src/opendxl/_local_verify/work/opendxl-client-java/golden.txt").unwrap();
+        let golden_path = std::env::var("DXL_GOLDEN_TXT")
+            .unwrap_or_else(|_| panic!("DXL_GOLDEN_TXT environment variable must be set for tests"));
+        let file = File::open(&golden_path).unwrap();
         let reader = BufReader::new(file);
         
         for line in reader.lines() {
@@ -287,8 +289,8 @@ mod tests {
                 let hex = parts[1];
                 let raw_bytes = from_hex(hex);
                 
-                let parsed = parse_dxl_message(&raw_bytes).expect(&format!("Failed to parse {}", name));
-                let encoded = encode_dxl_message(&parsed).expect(&format!("Failed to encode {}", name));
+                let parsed = parse_dxl_message(&raw_bytes).unwrap_or_else(|_| panic!("Failed to parse {}", name));
+                let encoded = encode_dxl_message(&parsed).unwrap_or_else(|_| panic!("Failed to encode {}", name));
                 
                 assert_eq!(raw_bytes, encoded, "Roundtrip failed for vector {}", name);
             }

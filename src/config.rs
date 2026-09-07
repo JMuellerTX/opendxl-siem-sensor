@@ -22,6 +22,30 @@ pub struct DxlConfig {
     pub kafka_topic: Option<String>,
 }
 
+impl Default for DxlConfig {
+    fn default() -> Self {
+        Self {
+            broker_cert_chain: "".to_string(),
+            cert_file: "".to_string(),
+            private_key: "".to_string(),
+            client_id: "".to_string(),
+            tls_min_version: "1.2".to_string(),
+            verify_hostname: false,
+            tls_ciphers: None,
+            brokers: Vec::new(),
+            syslog_host: None,
+            syslog_port: None,
+            syslog_protocol: None,
+            service_ttl_grace_period_mins: 5,
+            allowed_thumbprints: Vec::new(),
+            sensitive_topics: Vec::new(),
+            webhook_url: None,
+            kafka_brokers: None,
+            kafka_topic: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Broker {
     pub id: String,

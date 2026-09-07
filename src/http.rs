@@ -28,3 +28,25 @@ pub async fn start_http_sender(config: &DxlConfig) -> Option<mpsc::Sender<OcsfEv
 
     Some(tx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_http_sender_no_url() {
+        let config = DxlConfig::default();
+        let tx = start_http_sender(&config).await;
+        assert!(tx.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_http_sender_with_url() {
+        let config = DxlConfig {
+            webhook_url: Some("http://127.0.0.1:8080".to_string()),
+            ..Default::default()
+        };
+        let tx = start_http_sender(&config).await;
+        assert!(tx.is_some());
+    }
+}

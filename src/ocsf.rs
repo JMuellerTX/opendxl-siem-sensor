@@ -152,3 +152,34 @@ impl OcsfEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_activity_serialization() {
+        let na = NetworkActivity {
+            activity_id: 1,
+            activity_name: "Connect".to_string(),
+            category_uid: 4,
+            category_name: "Network Activity".to_string(),
+            class_uid: 4001,
+            class_name: "Network Activity".to_string(),
+            severity_id: 1,
+            severity: "Informational".to_string(),
+            time: 1600000000000,
+            type_uid: 400101,
+            type_name: "Network Connect".to_string(),
+            metadata: OcsfMetadata::default(),
+            src_endpoint: None,
+            client_guid: "test-guid".to_string(),
+        };
+
+        let event = OcsfEvent::NetworkActivity(na);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("Connect"));
+        assert!(json.contains("test-guid"));
+        assert_eq!(event.class_id(), 4001);
+    }
+}
