@@ -1,4 +1,6 @@
 mod dxl;
+mod tls;
+mod mqtt;
 
 use dxl::parse_dxl_message;
 use rumqttc::{AsyncClient, MqttOptions, QoS};
