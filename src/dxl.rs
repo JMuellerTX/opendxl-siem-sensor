@@ -276,8 +276,12 @@ mod tests {
 
     #[test]
     fn test_golden_vectors() {
-        let golden_path = std::env::var("DXL_GOLDEN_TXT")
-            .unwrap_or_else(|_| panic!("DXL_GOLDEN_TXT environment variable must be set for tests"));
+        // The vectors ship with the repo (tests/fixtures/golden.txt, taken from
+        // the Java client's MessageWireFormatTest); DXL_GOLDEN_TXT only
+        // overrides them, so `cargo test` is green on any machine.
+        let golden_path = std::env::var("DXL_GOLDEN_TXT").unwrap_or_else(|_| {
+            format!("{}/tests/fixtures/golden.txt", env!("CARGO_MANIFEST_DIR"))
+        });
         let file = File::open(&golden_path).unwrap();
         let reader = BufReader::new(file);
         
