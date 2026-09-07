@@ -1,0 +1,12 @@
+OpenDXL SIEM Sensor
+Copyright 2026 the OpenDXL SIEM Sensor contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes test vectors (tests/fixtures/golden.txt) taken from the
+OpenDXL Java Client (https://github.com/opendxl/opendxl-client-java),
+Copyright McAfee LLC / Musarubra US LLC, Apache License 2.0.
+
+"OpenDXL" and "Data Exchange Layer" are used descriptively to name the
+protocol and its open source implementations. This project is community
+work and not a product of Trellix or Musarubra US LLC.

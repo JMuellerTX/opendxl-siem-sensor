@@ -2,6 +2,8 @@
 name = "rust-siem-sensor"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+description = "Monitoring sensor for OpenDXL / DXL fabrics: normalises fabric events to OCSF and CEF and forwards them to a SIEM"
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
