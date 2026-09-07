@@ -1,12 +1,13 @@
 use crate::tls::NoHostnameVerifier;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::RootCertStore;
-use rustls_pemfile::{certs, private_key};
+use rustls_pemfile::certs;
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::Arc;
-use rumqttc::{AsyncClient, MqttOptions, TlsConfiguration, Transport};
+use rumqttc::{MqttOptions, Transport};
 
+#[allow(dead_code)]
 pub fn load_certs(path: &str) -> Vec<CertificateDer<'static>> {
     let mut reader = BufReader::new(File::open(path).unwrap());
     certs(&mut reader)
@@ -14,6 +15,7 @@ pub fn load_certs(path: &str) -> Vec<CertificateDer<'static>> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub fn load_keys(path: &str) -> PrivateKeyDer<'static> {
     let mut reader = BufReader::new(File::open(path).unwrap());
     rustls_pemfile::private_key(&mut reader)
@@ -21,6 +23,7 @@ pub fn load_keys(path: &str) -> PrivateKeyDer<'static> {
         .unwrap()
 }
 
+#[allow(dead_code)]
 pub fn build_mqtt_options(
     client_id: &str,
     host: &str,
@@ -59,15 +62,14 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    #[ignore = "Waiting for G-5 (v3 certs)"]
     async fn test_connectivity_dxl_modern() {
         let mut mqttoptions = build_mqtt_options(
             "rust-sensor",
             "127.0.0.1",
             18883,
-            "c:/src/test-certs/ca-bundle.crt",
-            "c:/src/test-certs/client.crt",
-            "c:/src/test-certs/client.key",
+            "c:/src/opendxl/_local_verify/gemini-sensor-config/ca-bundle.crt",
+            "c:/src/opendxl/_local_verify/gemini-sensor-config/client.crt",
+            "c:/src/opendxl/_local_verify/gemini-sensor-config/client.key",
             false,
         );
         mqttoptions.set_keep_alive(Duration::from_secs(5));

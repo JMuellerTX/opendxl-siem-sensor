@@ -34,10 +34,10 @@ pub struct DxlMessage {
     pub source_client_instance_id: Option<String>,
 }
 
-pub const MESSAGE_TYPE_REQUEST: u8 = 0;
-pub const MESSAGE_TYPE_RESPONSE: u8 = 1;
-pub const MESSAGE_TYPE_EVENT: u8 = 2;
-pub const MESSAGE_TYPE_ERROR: u8 = 3;
+#[allow(dead_code)] pub const MESSAGE_TYPE_REQUEST: u8 = 0;
+#[allow(dead_code)] pub const MESSAGE_TYPE_RESPONSE: u8 = 1;
+#[allow(dead_code)] pub const MESSAGE_TYPE_EVENT: u8 = 2;
+#[allow(dead_code)] pub const MESSAGE_TYPE_ERROR: u8 = 3;
 
 fn read_u8<R: Read>(rd: &mut R) -> Result<u8, std::io::Error> {
     let mut buf = [0; 1];
@@ -170,6 +170,7 @@ pub fn parse_dxl_message(raw: &[u8]) -> Result<DxlMessage, Box<dyn std::error::E
     })
 }
 
+#[allow(dead_code)]
 fn write_string(buf: &mut Vec<u8>, s: &str) -> Result<(), std::io::Error> {
     let bytes = s.as_bytes();
     let len = bytes.len();
@@ -186,6 +187,7 @@ fn write_string(buf: &mut Vec<u8>, s: &str) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn write_bytes(buf: &mut Vec<u8>, bytes: &[u8]) -> Result<(), std::io::Error> {
     let len = bytes.len();
     if len < 32 {
@@ -201,6 +203,7 @@ fn write_bytes(buf: &mut Vec<u8>, bytes: &[u8]) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn encode_dxl_message(msg: &DxlMessage) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut buf = Vec::new();
     

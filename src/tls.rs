@@ -4,7 +4,7 @@ use rustls::{DigitallySignedStruct, Error, SignatureScheme};
 use std::sync::Arc;
 use rustls::RootCertStore;
 use rustls::pki_types::TrustAnchor;
-use webpki::{EndEntityCert, RevocationOptions, KeyUsage, RevocationCheckDepth};
+use webpki::{EndEntityCert, KeyUsage};
 
 #[derive(Debug)]
 pub struct NoHostnameVerifier {
