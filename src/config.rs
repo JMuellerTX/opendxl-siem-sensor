@@ -11,6 +11,9 @@ pub struct DxlConfig {
     pub verify_hostname: bool,
     pub tls_ciphers: Option<String>,
     pub brokers: Vec<Broker>,
+    pub syslog_host: Option<String>,
+    pub syslog_port: Option<u16>,
+    pub syslog_protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +68,11 @@ impl DxlConfig {
             }
         }
 
+        let syslog = conf.section(Some("Syslog"));
+        let syslog_host = syslog.and_then(|s| s.get("Host")).map(|s| s.to_string());
+        let syslog_port = syslog.and_then(|s| s.get("Port")).and_then(|p| p.parse().ok());
+        let syslog_protocol = syslog.and_then(|s| s.get("Protocol")).map(|s| s.to_string());
+
         Ok(Self {
             broker_cert_chain,
             cert_file,
@@ -74,6 +82,9 @@ impl DxlConfig {
             verify_hostname,
             tls_ciphers,
             brokers,
+            syslog_host,
+            syslog_port,
+            syslog_protocol,
         })
     }
 }

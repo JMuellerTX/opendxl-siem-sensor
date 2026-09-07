@@ -2,14 +2,20 @@ mod config;
 mod dxl;
 mod mqtt;
 mod tls;
+pub mod ocsf;
+pub mod cef;
+pub mod syslog;
 
 use config::DxlConfig;
 use dxl::{encode_dxl_message, parse_dxl_message, DxlMessage, MESSAGE_TYPE_REQUEST};
-use log::{error, info, warn};
+use log::{error, info};
 use mqtt::build_mqtt_options;
 use rumqttc::{AsyncClient, QoS};
 use std::time::Duration;
 use uuid::Uuid;
+use ocsf::{OcsfEvent, NetworkActivity, ApiActivity, OcsfMetadata, OcsfApi, OcsfService, OcsfActor, OcsfUser};
+use cef::format_cef;
+use chrono::Utc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     mqttoptions.set_keep_alive(Duration::from_secs(60));
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 100);
+    
+    let syslog_tx = syslog::start_syslog_sender(&config).await;
     
     let reply_to_topic = format!("/mcafee/client/{}", config.client_id);
     client.subscribe(&reply_to_topic, QoS::AtMostOnce).await?;
@@ -86,7 +94,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             info!("Decoded DXL Message: ID={} Type={}", msg.message_id, msg.message_type);
                             
                             // Normalise and Detect
-                            handle_service_registry_event(&publish.topic, &msg.payload);
+                            if let Some(ocsf_event) = handle_dxl_message(&publish.topic, &msg) {
+                                let cef_str = format_cef(&ocsf_event);
+                                println!("Syslog Output: {}", cef_str);
+                                
+                                if let Some(tx) = &syslog_tx {
+                                    let _ = tx.send(cef_str).await;
+                                }
+                            }
                         }
                         Err(e) => {
                             error!("Failed to decode DXL message: {}", e);
@@ -107,26 +122,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn handle_service_registry_event(topic: &str, payload: &[u8]) {
-    if let Ok(json_str) = std::str::from_utf8(payload) {
+fn handle_dxl_message(topic: &str, msg: &DxlMessage) -> Option<OcsfEvent> {
+    if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
-            info!("Registry Event Payload: {}", value);
+            let now = Utc::now().timestamp_millis();
+            let metadata = OcsfMetadata::default();
             
-            let service_guid = value.get("serviceGuid").and_then(|v| v.as_str()).unwrap_or("unknown");
-
-            if topic.contains("svcregistry/register") {
+            if topic.contains("clientregistry/connect") || topic.contains("clientregistry/disconnect") {
+                let is_connect = topic.contains("connect");
+                let client_guid = value.get("clientGuid").and_then(|v| v.as_str()).unwrap_or("unknown");
+                
+                let na = NetworkActivity {
+                    activity_id: if is_connect { 1 } else { 2 },
+                    activity_name: if is_connect { "Connect".to_string() } else { "Disconnect".to_string() },
+                    category_uid: 4,
+                    category_name: "Network Activity".to_string(),
+                    class_uid: 4001,
+                    class_name: "Network Activity".to_string(),
+                    severity_id: 1,
+                    severity: "Informational".to_string(),
+                    time: now,
+                    type_uid: if is_connect { 400101 } else { 400102 },
+                    type_name: if is_connect { "Network Connect".to_string() } else { "Network Disconnect".to_string() },
+                    metadata,
+                    src_endpoint: None,
+                    client_guid: client_guid.to_string(),
+                };
+                return Some(OcsfEvent::NetworkActivity(na));
+                
+            } else if topic.contains("svcregistry/register") || topic.contains("svcregistry/unregister") {
+                let is_register = topic.contains("register");
+                let service_guid = value.get("serviceGuid").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let service_type = value.get("serviceType").and_then(|v| v.as_str()).unwrap_or("unknown");
-                info!("[DETECTION] Service registered: Guid={}, Type={}", service_guid, service_type);
-                if let Some(certs) = value.get("certificates").and_then(|v| v.as_array()) {
-                    for cert in certs {
-                        info!("[DETECTION] Certificate thumbprint: {}", cert);
-                    }
-                }
-            } else if topic.contains("svcregistry/unregister") {
-                info!("[DETECTION] Service unregistered: Guid={}", service_guid);
+                let client_guid = value.get("clientGuid").and_then(|v| v.as_str());
+
+                let actor = client_guid.map(|guid| OcsfActor {
+                    user: OcsfUser { uid: guid.to_string() }
+                });
+
+                let aa = ApiActivity {
+                    activity_id: if is_register { 2 } else { 4 },
+                    activity_name: if is_register { "Register Service".to_string() } else { "Unregister Service".to_string() },
+                    category_uid: 6,
+                    category_name: "Application Activity".to_string(),
+                    class_uid: 6003,
+                    class_name: "API Activity".to_string(),
+                    severity_id: 1,
+                    severity: "Informational".to_string(),
+                    time: now,
+                    type_uid: if is_register { 600302 } else { 600304 },
+                    type_name: if is_register { "Create API Activity".to_string() } else { "Delete API Activity".to_string() },
+                    metadata,
+                    api: OcsfApi {
+                        operation: if is_register { "register".to_string() } else { "unregister".to_string() },
+                        service: OcsfService {
+                            name: service_type.to_string(),
+                            uid: service_guid.to_string(),
+                        },
+                    },
+                    actor,
+                };
+                return Some(OcsfEvent::ApiActivity(aa));
+            } else if topic.contains("svcregistry/query") && msg.message_type == dxl::MESSAGE_TYPE_RESPONSE {
+                info!("Received svcregistry/query response, to be normalized");
+            } else if topic.contains("brokerregistry/query") && msg.message_type == dxl::MESSAGE_TYPE_RESPONSE {
+                info!("Received brokerregistry/query response");
+            } else {
+                info!("Ignored event on topic {}", topic);
             }
-        } else {
-            warn!("Payload is not valid JSON");
         }
     }
+    None
 }
