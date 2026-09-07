@@ -151,7 +151,7 @@ mod tests {
 
             let verifier = NoHostnameVerifier::new(Arc::new(root_store)).unwrap();
             
-            let mut client_config = ClientConfig::builder()
+            let client_config = ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(verifier))
                 .with_client_auth_cert(client_certs, client_key)

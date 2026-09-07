@@ -5,6 +5,7 @@ mod tls;
 pub mod ocsf;
 pub mod cef;
 pub mod syslog;
+pub mod detections;
 
 use config::DxlConfig;
 use dxl::{encode_dxl_message, parse_dxl_message, DxlMessage, MESSAGE_TYPE_REQUEST};
@@ -16,6 +17,7 @@ use uuid::Uuid;
 use ocsf::{OcsfEvent, NetworkActivity, ApiActivity, OcsfMetadata, OcsfApi, OcsfService, OcsfActor, OcsfUser};
 use cef::format_cef;
 use chrono::Utc;
+use detections::DetectionEngine;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 100);
     
     let syslog_tx = syslog::start_syslog_sender(&config).await;
+    let mut detection_engine = DetectionEngine::new(&config);
     
     let reply_to_topic = format!("/mcafee/client/{}", config.client_id);
     client.subscribe(&reply_to_topic, QoS::AtMostOnce).await?;
@@ -83,9 +86,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.publish("/mcafee/service/dxl/brokerregistry/query", QoS::AtMostOnce, false, encoded_broker_query).await?;
     info!("Sent brokerregistry/query");
 
+    let mut last_poll = Utc::now().timestamp();
+
     loop {
-        match eventloop.poll().await {
-            Ok(notification) => {
+        // Use timeout to allow periodic polling for detections
+        match tokio::time::timeout(Duration::from_secs(10), eventloop.poll()).await {
+            Ok(Ok(notification)) => {
                 if let rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish)) = notification {
                     info!("Received event on topic: {}", publish.topic);
                     
@@ -96,10 +102,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Normalise and Detect
                             if let Some(ocsf_event) = handle_dxl_message(&publish.topic, &msg) {
                                 let cef_str = format_cef(&ocsf_event);
-                                println!("Syslog Output: {}", cef_str);
+                                println!("Syslog Output (Normal): {}", cef_str);
                                 
                                 if let Some(tx) = &syslog_tx {
                                     let _ = tx.send(cef_str).await;
+                                }
+                            }
+                            
+                            // Feed into Detection Engine if payload is JSON
+                            if let Ok(json_str) = std::str::from_utf8(&msg.payload) {
+                                if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                    let alerts = detection_engine.process_event(&publish.topic, &value, &msg.source_client_id);
+                                    for alert in alerts {
+                                        let cef_str = format_cef(&alert);
+                                        println!("Syslog Output (Detection): {}", cef_str);
+                                        if let Some(tx) = &syslog_tx {
+                                            let _ = tx.send(cef_str).await;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -109,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let err_str = format!("{:?}", e);
                 if err_str.contains("PeerIncompatible(ServerTlsVersionIsDisabledByOurConfig)") {
                     error!("Broker offers no TLS >= {}; lower TlsMinVersion or upgrade the broker", config.tls_min_version);
@@ -118,6 +138,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
+            Err(_) => {
+                // Timeout, do periodic detection poll
+            }
+        }
+        
+        // Periodic check for timeouts (e.g. TTL expiry)
+        let now = Utc::now().timestamp();
+        if now - last_poll > 10 {
+            let alerts = detection_engine.poll_timeouts();
+            for alert in alerts {
+                let cef_str = format_cef(&alert);
+                println!("Syslog Output (Detection Timeout): {}", cef_str);
+                if let Some(tx) = &syslog_tx {
+                    let _ = tx.send(cef_str).await;
+                }
+            }
+            last_poll = now;
         }
     }
 }

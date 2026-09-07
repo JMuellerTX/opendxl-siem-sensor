@@ -14,6 +14,9 @@ pub struct DxlConfig {
     pub syslog_host: Option<String>,
     pub syslog_port: Option<u16>,
     pub syslog_protocol: Option<String>,
+    pub service_ttl_grace_period_mins: u32,
+    pub allowed_thumbprints: Vec<String>,
+    pub sensitive_topics: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +76,22 @@ impl DxlConfig {
         let syslog_port = syslog.and_then(|s| s.get("Port")).and_then(|p| p.parse().ok());
         let syslog_protocol = syslog.and_then(|s| s.get("Protocol")).map(|s| s.to_string());
 
+        let detections = conf.section(Some("Detections"));
+        let service_ttl_grace_period_mins = detections
+            .and_then(|d| d.get("ServiceTtlGracePeriodMins"))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5);
+            
+        let allowed_thumbprints = detections
+            .and_then(|d| d.get("AllowedThumbprints"))
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default();
+            
+        let sensitive_topics = detections
+            .and_then(|d| d.get("SensitiveTopics"))
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default();
+
         Ok(Self {
             broker_cert_chain,
             cert_file,
@@ -85,6 +104,9 @@ impl DxlConfig {
             syslog_host,
             syslog_port,
             syslog_protocol,
+            service_ttl_grace_period_mins,
+            allowed_thumbprints,
+            sensitive_topics,
         })
     }
 }
