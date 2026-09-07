@@ -1,8 +1,8 @@
 # OpenDXL SIEM Sensor (Rust)
 
-Ein leichtgewichtiger Sensor zur Überwachung einer OpenDXL-Fabric. Der Sensor verbindet sich als passiver Teilnehmer (Subscriber) mit dem OpenDXL-Broker-Netzwerk, überwacht sicherheitsrelevante Ereignisse und exportiert diese in standardisierten Formaten (CEF/Syslog, OCSF) an ein Security Information and Event Management (SIEM) System.
+A lightweight sensor for monitoring an OpenDXL fabric. The sensor connects as a passive participant (subscriber) to the OpenDXL broker network, monitors security-relevant events, and exports them in standardized formats (CEF/Syslog, OCSF) to a Security Information and Event Management (SIEM) system. It actively queries the service registry at startup to initialize its state.
 
-## Architektur
+## Architecture
 
 ```mermaid
 graph LR
@@ -28,22 +28,22 @@ graph LR
     S -- "OCSF JSON" --> KF
 ```
 
-Der Sensor arbeitet passiv und erfordert keine Anpassungen an bestehenden Clients. Er konsumiert die internen Registry-Events des Brokers und analysiert sie auf Anomalien.
+The sensor operates passively on the event bus without requiring modifications to existing clients. It consumes the broker's internal registry events and analyzes them for anomalies, and performs an active query on startup to capture the current state of the fabric.
 
-## Voraussetzungen
+## Prerequisites
 
-- **Rust-Toolchain:** Zum Kompilieren des Sensors (`cargo build --release`).
-- **OpenDXL Broker:** Getestet gegen OSS-Broker und Trellix Broker (v6.1.3+).
-  - *Wichtig:* Der Sensor nutzt `rustls` für die TLS-Verbindung. `rustls` unterstützt kein RSA Key Exchange (RSA-Kex). Der Broker muss zwingend PFS-Suiten (Perfect Forward Secrecy, z.B. ECDHE oder TLS 1.3) anbieten. Alte Broker, die nur `TLS_RSA_*` unterstützen, werden abgewiesen.
-- **Zertifikate:** Ein eigenes Client-Zertifikat für den Sensor, provisioniert über das Python-Tooling:
+- **Rust Toolchain:** To compile the sensor (`cargo build --release`).
+- **OpenDXL Broker:** Compatible with the OSS-Broker. Protocol semantics verified against the Trellix Broker (v6.1.3+).
+  - *Important:* The sensor uses `rustls` for its TLS connection. `rustls` does not support RSA Key Exchange (RSA-Kex). The broker must offer PFS (Perfect Forward Secrecy) cipher suites (e.g., ECDHE or TLS 1.3). Older brokers supporting only `TLS_RSA_*` are not supported.
+- **Certificates:** A dedicated client certificate for the sensor, provisioned via the Python tooling:
   ```bash
-  python -m dxlclient provisionconfig <zielordner> <broker-ip> rust-sensor -u admin -p password
+  python -m dxlclient provisionconfig <target_dir> <broker-ip> rust-sensor -u admin -p password
   ```
-  *(Hinweis: Für saubere v3-Zertifikate wird der Console-Fork mit Fix f4a17e2 empfohlen).*
+  *(Note: For proper v3 certificates, the console fork with fix f4a17e2 is recommended).*
 
-## Konfiguration
+## Configuration
 
-Der Sensor liest die Standard `dxlclient.config` (INI-Format). Diese wird um einen Sensor-spezifischen Abschnitt erweitert:
+The sensor reads the standard `dxlclient.config` (INI format). This is extended with sensor-specific sections:
 
 ```ini
 [Certs]
@@ -59,68 +59,81 @@ ClientId={your-uuid-here}
 VerifyHostname=false
 TlsMinVersion=1.2
 
-[Sensor]
-# Erlaubte Zertifikats-Thumbprints (SHA-1 Hex, klein geschrieben)
+[Detections]
+# Allowed certificate thumbprints (SHA-1 Hex, lowercase)
 AllowedThumbprints=5a752ed6a24f6d2dd77634b0c68dd729b48d4613, a1b2c3d4...
-# Topics, die überwacht werden sollen (Publisher-Alarm)
+# Topics to monitor (Publisher alert)
 SensitiveTopics=/mcafee/service/tie/file/reputation/set
-# Kulanzzeit in Minuten, bevor ein abgelaufener Dienst gemeldet wird (Default: 5)
-GracePeriodMins=5
+# Grace period in minutes before reporting an expired service (Default: 5)
+ServiceTtlGracePeriodMins=5
 
-[Output]
-SyslogHost=127.0.0.1
-SyslogPort=514
-SyslogProtocol=udp
-HttpWebhookUrl=http://siem.local:8080/ingest
-# Optional, erfordert Feature-Flag `rdkafka`
-# KafkaBrokers=kafka.local:9092
-# KafkaTopic=dxl-events
+[Syslog]
+Host=127.0.0.1
+Port=514
+Protocol=udp
+
+[Webhook]
+Url=http://siem.local:8080/ingest
+
+[Kafka]
+# Optional, requires feature flag `rdkafka`
+# Brokers=kafka.local:9092
+# Topic=dxl-events
 ```
 
-## Detections und CEF-Beispiele
+## Detections and CEF Examples
 
-Der Sensor generiert eigene Alarme (Detection Findings), wenn er verdächtige Verhaltensweisen auf der Fabric erkennt. 
+The sensor generates its own alerts (Detection Findings) when it identifies suspicious behavior on the fabric. 
 
-**1. Legacy Cipher Suite (Schwache Verschlüsselung)**
-Ausgelöst, wenn ein Client mit einer alten, nicht-PFS Cipher Suite (z.B. `TLS_RSA_WITH_AES_128_CBC_SHA256`) verbindet.
+**1. Legacy Cipher Suite (Weak Encryption)**
+Triggered when a client connects using an old, non-PFS cipher suite (e.g., `TLS_RSA_WITH_AES_128_CBC_SHA256`).
 > `CEF:0|OpenDXL|RustSensor|1.0|2004|Legacy Cipher Suite|4|msg=Client connected with weak legacy cipher: TLS_RSA_WITH_AES_128_CBC_SHA256 suser=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
 
-**2. Unknown Certificate Thumbprint (Unbekannte Identität)**
-Ausgelöst, wenn ein Dienst oder Client sich registriert/verbindet, dessen Thumbprint nicht in der `AllowedThumbprints` Liste steht.
+**2. Unknown Certificate Thumbprint (Unknown Identity)**
+Triggered when a service or client registers/connects with a thumbprint that is not listed in `AllowedThumbprints`.
 > `CEF:0|OpenDXL|RustSensor|1.0|2004|Unknown Certificate Thumbprint|4|msg=Client connected with unknown thumbprint: 9999999999999999999999999999999999999999 suser=9999999999999999999999999999999999999999 deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
 
-**3. Sensitive Topic Published (Unautorisierter Zugriff)**
-Ausgelöst, wenn ein Client Nachrichten auf einem als sensibel konfigurierten Topic publiziert.
+**3. Sensitive Topic Published (Unauthorized Access)**
+Triggered when a client publishes messages on a topic configured as sensitive.
 > `CEF:0|OpenDXL|RustSensor|1.0|2004|Sensitive Topic Published|4|msg=Client 5a752ed6a24f6d2dd77634b0c68dd729b48d4613 published to sensitive topic /mcafee/service/tie/file/reputation/set suser=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
 
-**4. Service TTL Expired (Dienst-Ausfall)**
-Ausgelöst, wenn die TTL (Time To Live) eines registrierten Dienstes abläuft und er sich nicht innerhalb der `GracePeriodMins` re-registriert oder sauber abmeldet.
+**4. Service TTL Expired (Service Outage)**
+Triggered when the TTL (Time To Live) of a registered service expires and it neither re-registers nor cleanly unregisters within the `ServiceTtlGracePeriodMins`.
 > `CEF:0|OpenDXL|RustSensor|1.0|2004|Service TTL Expired|4|msg=Service {guid} (/mcafee/service/tie/file/reputation) TTL expired without unregister deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
 
 **5. Fabric Change Detected**
-Ausgelöst bei Topologie-Änderungen im Broker-Netzwerk (Bridges up/down).
+Triggered by topology changes in the broker network (e.g., bridges up/down).
+> `CEF:0|OpenDXL|RustSensor|1.0|2004|Fabric Change Detected|4|msg=A fabric topology change or broker state change was detected. deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
 
-Zusätzlich zu Detections werden reguläre Audit-Events protokolliert, z.B. Network Connect:
+**6. Client Rate Anomaly**
+Triggered when a specific client publishes more than 100 messages per minute.
+> `CEF:0|OpenDXL|RustSensor|1.0|2004|Client Rate Anomaly|4|msg=High rate detected for client 5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
+
+**7. Topic Rate Anomaly**
+Triggered when a specific topic receives more than 100 messages per minute.
+> `CEF:0|OpenDXL|RustSensor|1.0|2004|Topic Rate Anomaly|4|msg=High rate detected for topic /some/normal/topic deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
+
+In addition to detections, regular audit events are logged, e.g., Network Connect:
 > `CEF:0|OpenDXL|RustSensor|1.0|4001|Connect|1|app=mqtt deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString1Label=client_guid deviceCustomString2=TLSv1.3 deviceCustomString2Label=tls_version deviceCustomString3=TLS_AES_256_GCM_SHA384 deviceCustomString3Label=cipher deviceCustomString4=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString4Label=cert_thumbprint src=172.17.0.1`
 
-## Betrieb
+## Operation
 
-- **Starten:** `DXL_CONFIG=/pfad/zur/dxlclient.config ./rust-siem-sensor`
-- **Exit-Codes:** 
-  - `0`: Normales Beenden.
-  - `2`: Fehler beim Laden der Konfiguration (z.B. Pfad nicht gefunden oder INI ungültig).
-- **Logging:** Der Sensor nutzt `env_logger`. Loglevel steuerbar über `RUST_LOG` (z.B. `RUST_LOG=info`).
-- **Connect-Events:** Standardmäßig veröffentlichen Broker (Trellix und OSS) keine Events beim reinen Verbindungsaufbau von Clients. Der Sensor ist fehlertolerant konstruiert und arbeitet auch ohne diese Events zuverlässig, da Dienst-Registrierungen (`svcregistry`) als Hauptquelle dienen. Um Connect-Events für Client-Sichtbarkeit und Legacy-Cipher-Detections zu nutzen, muss im modifizierten Broker-Fork `DXL_SEND_CONNECT_EVENTS=true` gesetzt sein.
+- **Starting:** `DXL_CONFIG=/path/to/dxlclient.config ./rust-siem-sensor`
+- **Exit Codes:** 
+  - `0`: Normal exit.
+  - `2`: Error loading the configuration (e.g., path not found or invalid INI).
+- **Logging:** The sensor uses `env_logger`. Log levels can be controlled via `RUST_LOG` (e.g., `RUST_LOG=info`).
+- **Connect Events:** By default, brokers (Trellix and OSS) do not publish events for simple client connections. The sensor is designed to be fault-tolerant and operates reliably without these events, as service registrations (`svcregistry`) serve as the primary source of truth. To utilize connect events for client visibility and legacy cipher detections, the modified broker fork must have `DXL_SEND_CONNECT_EVENTS=true` enabled.
 
 ## Tests
 
-- Unit-Tests: `cargo test`
-- Um Integrations-Tests gegen lokale Broker-Instanzen auszuführen, müssen Umgebungsvariablen gesetzt werden, die auf entsprechende Config-Verzeichnisse zeigen:
-  - `DXL_SENSOR_TEST_CONFIG`: Konfiguration für einen Broker mit ECDHE/TLS 1.2 (z.B. `dxl-modern`).
-  - `DXL_SENSOR_TEST_CONFIG_TLS13`: Konfiguration für einen Broker mit TLS 1.3 (z.B. `dxlbroker:almalinux`).
-  - Ohne diese Variablen werden die Verbindungs-Tests übersprungen.
-- Für die Validierung der MessagePack-Kodierung nutzt der Sensor eine Java-Referenzdatei (`tests/fixtures/golden.txt`). Sie kann über `DXL_GOLDEN_TXT` überschrieben werden.
+- Unit tests: `cargo test`
+- To run integration tests against local broker instances, environment variables pointing to the respective config directories must be set:
+  - `DXL_SENSOR_TEST_CONFIG_DIR`: Configuration for a broker with ECDHE/TLS 1.2 (e.g., `dxl-modern`).
+  - `DXL_SENSOR_TEST_CONFIG_TLS13`: Configuration for a broker with TLS 1.3 (e.g., `dxlbroker:almalinux`).
+  - Without these variables, connection tests are skipped.
+- To validate the MessagePack encoding, the sensor uses a Java reference file (`tests/fixtures/golden.txt`). It can be overridden via `DXL_GOLDEN_TXT`.
 
 ## OCSF Mapping
 
-Details zur Abbildung der OpenDXL-Ereignisse auf das Open Cybersecurity Schema Framework (OCSF) finden sich in der [OCSF-MAPPING.md](docs/OCSF-MAPPING.md).
+Details on mapping OpenDXL events to the Open Cybersecurity Schema Framework (OCSF) can be found in [OCSF-MAPPING.md](docs/OCSF-MAPPING.md).

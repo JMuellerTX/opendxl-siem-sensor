@@ -173,4 +173,39 @@ mod tests {
         assert_eq!(config.brokers[1].ip, "[::1]");
         assert_eq!(config.brokers[0].port, 8883);
     }
+    #[test]
+    fn test_load_readme_config() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "[Certs]").unwrap();
+        writeln!(file, "BrokerCertChain=ca-bundle.crt").unwrap();
+        writeln!(file, "CertFile=client.crt").unwrap();
+        writeln!(file, "PrivateKey=client.key").unwrap();
+        writeln!(file, "[General]").unwrap();
+        writeln!(file, "ClientId={{your-uuid-here}}").unwrap();
+        writeln!(file, "VerifyHostname=false").unwrap();
+        writeln!(file, "TlsMinVersion=1.2").unwrap();
+        writeln!(file, "[Brokers]").unwrap();
+        writeln!(file, "mybroker=mybroker;8883;broker.local;192.168.1.10").unwrap();
+        writeln!(file, "[Detections]").unwrap();
+        writeln!(file, "AllowedThumbprints=5a752ed6a24f6d2dd77634b0c68dd729b48d4613, a1b2c3d4").unwrap();
+        writeln!(file, "SensitiveTopics=/mcafee/service/tie/file/reputation/set").unwrap();
+        writeln!(file, "ServiceTtlGracePeriodMins=5").unwrap();
+        writeln!(file, "[Syslog]").unwrap();
+        writeln!(file, "Host=127.0.0.1").unwrap();
+        writeln!(file, "Port=514").unwrap();
+        writeln!(file, "Protocol=udp").unwrap();
+        writeln!(file, "[Webhook]").unwrap();
+        writeln!(file, "Url=http://siem.local:8080/ingest").unwrap();
+        writeln!(file, "[Kafka]").unwrap();
+        writeln!(file, "Brokers=kafka.local:9092").unwrap();
+        writeln!(file, "Topic=dxl-events").unwrap();
+
+        let config = DxlConfig::load(file.path()).unwrap();
+        assert_eq!(config.allowed_thumbprints.len(), 2);
+        assert_eq!(config.allowed_thumbprints[0], "5a752ed6a24f6d2dd77634b0c68dd729b48d4613");
+        assert_eq!(config.service_ttl_grace_period_mins, 5);
+        assert_eq!(config.syslog_host.unwrap(), "127.0.0.1");
+        assert_eq!(config.webhook_url.unwrap(), "http://siem.local:8080/ingest");
+        assert_eq!(config.kafka_topic.unwrap(), "dxl-events");
+    }
 }

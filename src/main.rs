@@ -282,7 +282,7 @@ fn handle_dxl_message(topic: &str, msg: &DxlMessage, engine: &DetectionEngine) -
                     severity_id: 1,
                     severity: "Informational".to_string(),
                     time: now,
-                    type_uid: if is_register { 600302 } else { 600304 },
+                    type_uid: if is_register { 600301 } else { 600304 },
                     type_name: if is_register { "Create API Activity".to_string() } else { "Delete API Activity".to_string() },
                     metadata,
                     api: OcsfApi {
