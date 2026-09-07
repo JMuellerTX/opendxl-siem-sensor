@@ -37,10 +37,9 @@ pub fn format_cef(event: &OcsfEvent) -> String {
             ext.insert("deviceCustomString1", na.client_guid.clone());
             ext.insert("deviceCustomString1Label", "client_guid".to_string());
 
-            if let Some(src) = &na.src_endpoint {
-                if let Some(ip) = &src.ip {
+            if let Some(src) = &na.src_endpoint
+                && let Some(ip) = &src.ip {
                     ext.insert("src", ip.clone());
-                }
             }
             if let Some(info) = &na.connection_info {
                 ext.insert("app", info.protocol_name.clone());
