@@ -17,6 +17,9 @@ pub struct DxlConfig {
     pub service_ttl_grace_period_mins: u32,
     pub allowed_thumbprints: Vec<String>,
     pub sensitive_topics: Vec<String>,
+    pub webhook_url: Option<String>,
+    pub kafka_brokers: Option<String>,
+    pub kafka_topic: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +95,13 @@ impl DxlConfig {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
 
+        let webhook = conf.section(Some("Webhook"));
+        let webhook_url = webhook.and_then(|w| w.get("Url")).map(|s| s.to_string());
+
+        let kafka = conf.section(Some("Kafka"));
+        let kafka_brokers = kafka.and_then(|k| k.get("Brokers")).map(|s| s.to_string());
+        let kafka_topic = kafka.and_then(|k| k.get("Topic")).map(|s| s.to_string());
+
         Ok(Self {
             broker_cert_chain,
             cert_file,
@@ -107,6 +117,9 @@ impl DxlConfig {
             service_ttl_grace_period_mins,
             allowed_thumbprints,
             sensitive_topics,
+            webhook_url,
+            kafka_brokers,
+            kafka_topic,
         })
     }
 }

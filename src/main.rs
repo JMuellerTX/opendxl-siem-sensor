@@ -6,6 +6,8 @@ pub mod ocsf;
 pub mod cef;
 pub mod syslog;
 pub mod detections;
+pub mod http;
+pub mod kafka;
 
 use config::DxlConfig;
 use dxl::{encode_dxl_message, parse_dxl_message, DxlMessage, MESSAGE_TYPE_REQUEST};
@@ -46,6 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 100);
     
     let syslog_tx = syslog::start_syslog_sender(&config).await;
+    let http_tx = http::start_http_sender(&config).await;
+    let kafka_tx = kafka::start_kafka_sender(&config).await;
     let mut detection_engine = DetectionEngine::new(&config);
     
     let reply_to_topic = format!("/mcafee/client/{}", config.client_id);
@@ -107,6 +111,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(tx) = &syslog_tx {
                                     let _ = tx.send(cef_str).await;
                                 }
+                                if let Some(tx) = &http_tx {
+                                    let _ = tx.send(ocsf_event.clone()).await;
+                                }
+                                if let Some(tx) = &kafka_tx {
+                                    let _ = tx.send(ocsf_event).await;
+                                }
                             }
                             
                             // Feed into Detection Engine if payload is JSON
@@ -118,6 +128,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         println!("Syslog Output (Detection): {}", cef_str);
                                         if let Some(tx) = &syslog_tx {
                                             let _ = tx.send(cef_str).await;
+                                        }
+                                        if let Some(tx) = &http_tx {
+                                            let _ = tx.send(alert.clone()).await;
+                                        }
+                                        if let Some(tx) = &kafka_tx {
+                                            let _ = tx.send(alert).await;
                                         }
                                     }
                                 }
@@ -152,6 +168,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Syslog Output (Detection Timeout): {}", cef_str);
                 if let Some(tx) = &syslog_tx {
                     let _ = tx.send(cef_str).await;
+                }
+                if let Some(tx) = &http_tx {
+                    let _ = tx.send(alert.clone()).await;
+                }
+                if let Some(tx) = &kafka_tx {
+                    let _ = tx.send(alert).await;
                 }
             }
             last_poll = now;
