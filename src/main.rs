@@ -95,7 +95,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                error!("MQTT Connection error: {}", e);
+                let err_str = format!("{:?}", e);
+                if err_str.contains("PeerIncompatible(ServerTlsVersionIsDisabledByOurConfig)") {
+                    error!("Broker offers no TLS >= {}; lower TlsMinVersion or upgrade the broker", config.tls_min_version);
+                } else {
+                    error!("MQTT Connection error: {}", e);
+                }
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
         }

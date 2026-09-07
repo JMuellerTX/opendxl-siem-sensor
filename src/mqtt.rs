@@ -63,9 +63,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_connectivity_dxl_modern() {
-        let config_path = "c:/src/opendxl/_local_verify/gemini-sensor-config/ca-bundle.crt";
-        if !std::path::Path::new(config_path).exists() {
-            println!("Skipping test_connectivity_dxl_modern: config not found");
+        let config_dir = match std::env::var("DXL_SENSOR_TEST_CONFIG_DIR") {
+            Ok(dir) => dir,
+            Err(_) => {
+                println!("Skipping test_connectivity_dxl_modern: DXL_SENSOR_TEST_CONFIG_DIR not set");
+                return;
+            }
+        };
+        let ca_path = format!("{}/ca-bundle.crt", config_dir);
+        if !std::path::Path::new(&ca_path).exists() {
+            println!("Skipping test_connectivity_dxl_modern: ca-bundle.crt not found in {}", config_dir);
             return;
         }
 
@@ -73,9 +80,9 @@ mod tests {
             "rust-sensor",
             "127.0.0.1",
             18883,
-            config_path,
-            "c:/src/opendxl/_local_verify/gemini-sensor-config/client.crt",
-            "c:/src/opendxl/_local_verify/gemini-sensor-config/client.key",
+            &ca_path,
+            &format!("{}/client.crt", config_dir),
+            &format!("{}/client.key", config_dir),
             false,
         );
         mqttoptions.set_keep_alive(Duration::from_secs(5));
@@ -98,22 +105,33 @@ mod tests {
         use rustls::pki_types::ServerName;
         use crate::tls::NoHostnameVerifier;
 
-        let configs = vec![
-            (
+        let config_modern = std::env::var("DXL_SENSOR_TEST_CONFIG_DIR");
+        let config_tls13 = std::env::var("DXL_SENSOR_TEST_CONFIG_DIR_TLS13");
+
+        let mut configs = Vec::new();
+        if let Ok(dir) = config_modern {
+            configs.push((
                 "dxl-modern (TLS 1.2)", 
                 18883, 
-                "c:/src/opendxl/_local_verify/gemini-sensor-config",
+                dir,
                 "rust-siem-sensor",
                 rustls::version::TLS12.version
-            ),
-            (
+            ));
+        }
+        if let Ok(dir) = config_tls13 {
+            configs.push((
                 "dxl-tls13 (TLS 1.3)", 
                 58883, 
-                "c:/src/opendxl/_local_verify/gemini-sensor-config-tls13",
+                dir,
                 "rust-siem-sensor-tls13",
                 rustls::version::TLS13.version
-            ),
-        ];
+            ));
+        }
+
+        if configs.is_empty() {
+            println!("Skipping test_tls_versions_g9: Environment variables for test configs not set");
+            return;
+        }
 
         for (name, port, path, _cn, _expected_version) in configs {
             let ca_path = format!("{}/ca-bundle.crt", path);
@@ -161,10 +179,16 @@ mod tests {
         use rustls::pki_types::ServerName;
         use crate::tls::NoHostnameVerifier;
 
-        let path = "c:/src/opendxl/_local_verify/gemini-sensor-config";
+        let path = match std::env::var("DXL_SENSOR_TEST_CONFIG_DIR") {
+            Ok(dir) => dir,
+            Err(_) => {
+                println!("Skipping test_tls13_min_version_against_modern: DXL_SENSOR_TEST_CONFIG_DIR not set");
+                return;
+            }
+        };
         let ca_path = format!("{}/ca-bundle.crt", path);
         if !std::path::Path::new(&ca_path).exists() {
-            println!("Skipping test_tls13_min_version_against_modern: config not found");
+            println!("Skipping test_tls13_min_version_against_modern: config not found in {}", path);
             return;
         }
 
