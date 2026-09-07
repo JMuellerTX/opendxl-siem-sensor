@@ -12,7 +12,7 @@ pub fn escape_cef_extension(value: &str) -> String {
 pub fn format_cef(event: &OcsfEvent) -> String {
     let version = "0";
     let vendor = "OpenDXL";
-    let product = "RustSensor";
+    let product = "opendxl-siem-sensor";
     let dev_version = "1.0";
     let class_id = event.class_id().to_string();
     let name = event.event_name();
@@ -122,7 +122,7 @@ mod tests {
         };
 
         let cef = format_cef(&OcsfEvent::NetworkActivity(ev));
-        assert_eq!(cef, "CEF:0|OpenDXL|RustSensor|1.0|4001|Connect|1|deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=client-123 deviceCustomString1Label=client_guid");
+        assert_eq!(cef, "CEF:0|OpenDXL|opendxl-siem-sensor|1.0|4001|Connect|1|deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=client-123 deviceCustomString1Label=client_guid");
     }
 
     #[test]
@@ -159,6 +159,6 @@ mod tests {
         };
 
         let cef = format_cef(&OcsfEvent::NetworkActivity(ev));
-        assert_eq!(cef, "CEF:0|OpenDXL|RustSensor|1.0|4001|Connect|1|app=mqtt deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString1Label=client_guid deviceCustomString2=TLSv1.3 deviceCustomString2Label=tls_version deviceCustomString3=TLS_AES_256_GCM_SHA384 deviceCustomString3Label=cipher deviceCustomString4=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString4Label=cert_thumbprint src=172.17.0.1");
+        assert_eq!(cef, "CEF:0|OpenDXL|opendxl-siem-sensor|1.0|4001|Connect|1|app=mqtt deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString1Label=client_guid deviceCustomString2=TLSv1.3 deviceCustomString2Label=tls_version deviceCustomString3=TLS_AES_256_GCM_SHA384 deviceCustomString3Label=cipher deviceCustomString4=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString4Label=cert_thumbprint src=172.17.0.1");
     }
 }

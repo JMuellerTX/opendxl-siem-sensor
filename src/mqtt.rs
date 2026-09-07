@@ -114,7 +114,7 @@ mod tests {
                 "dxl-modern (TLS 1.2)", 
                 18883, 
                 dir,
-                "rust-siem-sensor",
+                "opendxl-siem-sensor",
                 rustls::version::TLS12.version
             ));
         }
@@ -123,7 +123,7 @@ mod tests {
                 "dxl-tls13 (TLS 1.3)", 
                 58883, 
                 dir,
-                "rust-siem-sensor-tls13",
+                "opendxl-siem-sensor-tls13",
                 rustls::version::TLS13.version
             ));
         }

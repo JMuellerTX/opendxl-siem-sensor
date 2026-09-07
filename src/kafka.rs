@@ -38,7 +38,7 @@ pub async fn start_kafka_sender(config: &DxlConfig) -> Option<mpsc::Sender<OcsfE
             if let Ok(json_str) = serde_json::to_string(&event) {
                 let record = FutureRecord::to(&topic)
                     .payload(&json_str)
-                    .key("rust-siem-sensor");
+                    .key("opendxl-siem-sensor");
                 
                 if let Err((e, _)) = producer.send(record, Duration::from_secs(0)).await {
                     error!("Failed to send to Kafka: {:?}", e);

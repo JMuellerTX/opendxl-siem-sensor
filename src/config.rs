@@ -80,7 +80,7 @@ impl DxlConfig {
         let tls_min_version = general.get("TlsMinVersion").unwrap_or("1.2").to_string();
         let verify_hostname = general.get("VerifyHostname")
             .map(|v| v.to_lowercase() == "true" || v == "1")
-            .unwrap_or(false); // C-1 E: VerifyHostname=false by default
+            .unwrap_or(false); // Off by default: broker certificates on real fabrics carry no matching SAN
         let tls_ciphers = general.get("TlsCiphers").map(|s| s.to_string());
 
         let brokers_sec = conf.section(Some("Brokers")).ok_or("Missing [Brokers] section")?;

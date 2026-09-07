@@ -1043,6 +1043,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "opendxl-siem-sensor"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "env_logger",
+ "log",
+ "rdkafka",
+ "reqwest",
+ "rmp",
+ "rmp-serde",
+ "rumqttc",
+ "rust-ini",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-webpki 0.103.15",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "uuid",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1409,30 +1433,6 @@ checksum = "796e8d2b6696392a43bea58116b667fb4c29727dc5abd27d6acf338bb4f688c7"
 dependencies = [
  "cfg-if",
  "ordered-multimap",
-]
-
-[[package]]
-name = "rust-siem-sensor"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "env_logger",
- "log",
- "rdkafka",
- "reqwest",
- "rmp",
- "rmp-serde",
- "rumqttc",
- "rust-ini",
- "rustls",
- "rustls-pemfile",
- "rustls-webpki 0.103.15",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "uuid",
 ]
 
 [[package]]
