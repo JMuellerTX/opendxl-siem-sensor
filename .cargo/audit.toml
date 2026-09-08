@@ -1,0 +1,41 @@
+# cargo-audit configuration.
+#
+# Every ignored advisory is listed with the reasoning and with the condition
+# that makes it removable again. Everything else fails the build.
+#
+# All of these are the same finding wearing five hats: two copies of
+# rustls-webpki are in the tree, and the flagged one is not the copy that
+# validates anything here. Measured with `cargo tree -i`:
+#
+#   rustls-webpki 0.103.15  <- rustls 0.23 (the TLS stack that checks the
+#                              certificates), and this crate directly
+#   rustls-webpki 0.102.8   <- rumqttc 0.25.1, and nothing else
+#
+# The sensor hands rumqttc a finished rustls::ClientConfig through
+# Transport::tls_with_config, so rumqttc's own certificate-validation path -
+# the one built on 0.102.8 - is never entered.
+#
+# rumqttc declares `rustls-webpki ^0.102.8` behind `use-rustls-no-provider`,
+# the same feature that provides the TLS transport, so it cannot be switched
+# off on its own. Checked 2026-09-08: rumqttc 0.25.1 is the latest release and
+# 0.102.8 is the last 0.102.x, so there is no version in that range to move to.
+# The fix has to come from rumqttc.
+#
+# Delete every entry below the moment `cargo tree -i rustls-webpki@0.102.8`
+# comes back empty.
+
+[advisories]
+ignore = [
+    # rustls-webpki 0.102.8, all four fixed in 0.103.x only:
+    "RUSTSEC-2026-0049",  # CRLs not authoritative by distribution point
+    "RUSTSEC-2026-0098",  # name constraints for URI names incorrectly accepted
+    "RUSTSEC-2026-0099",  # name constraints accepted for a wildcard name
+    "RUSTSEC-2026-0104",  # reachable panic parsing a certificate revocation list
+
+    # rustls-pemfile is unmaintained. This crate no longer depends on it - PEM
+    # parsing moved to rustls-pki-types, which rustls brings anyway - but
+    # rumqttc still pulls it, for the same reason as above. Informational
+    # rather than a vulnerability; listed so the report stays quiet about
+    # something nobody here can act on.
+    "RUSTSEC-2025-0134",
+]

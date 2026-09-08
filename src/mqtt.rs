@@ -1,22 +1,24 @@
 use crate::tls::NoHostnameVerifier;
 use rumqttc::{MqttOptions, Transport};
 use rustls::RootCertStore;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls_pemfile::certs;
-use std::fs::File;
-use std::io::BufReader;
 use std::sync::Arc;
 
+// PEM parsing comes from rustls-pki-types, which rustls brings anyway.
+// rustls-pemfile, the crate that used to do this, is unmaintained
+// (RUSTSEC-2025-0134) and its API moved here.
 #[allow(dead_code)]
 pub fn load_certs(path: &str) -> Vec<CertificateDer<'static>> {
-    let mut reader = BufReader::new(File::open(path).unwrap());
-    certs(&mut reader).map(|result| result.unwrap()).collect()
+    CertificateDer::pem_file_iter(path)
+        .unwrap()
+        .map(|result| result.unwrap())
+        .collect()
 }
 
 #[allow(dead_code)]
 pub fn load_keys(path: &str) -> PrivateKeyDer<'static> {
-    let mut reader = BufReader::new(File::open(path).unwrap());
-    rustls_pemfile::private_key(&mut reader).unwrap().unwrap()
+    PrivateKeyDer::from_pem_file(path).unwrap()
 }
 
 #[allow(dead_code)]

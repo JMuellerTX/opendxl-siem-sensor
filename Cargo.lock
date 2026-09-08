@@ -1056,7 +1056,6 @@ dependencies = [
  "rumqttc",
  "rust-ini",
  "rustls",
- "rustls-pemfile",
  "rustls-webpki 0.103.15",
  "serde",
  "serde_json",
