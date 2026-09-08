@@ -2,11 +2,19 @@ use crate::ocsf::OcsfEvent;
 use std::collections::BTreeMap;
 
 pub fn escape_cef_header(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('|', "\\|").replace('\n', "\\n").replace('\r', "\\r")
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 pub fn escape_cef_extension(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('=', "\\=").replace('\n', "\\n").replace('\r', "\\r")
+    value
+        .replace('\\', "\\\\")
+        .replace('=', "\\=")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 pub fn format_cef(event: &OcsfEvent) -> String {
@@ -38,8 +46,9 @@ pub fn format_cef(event: &OcsfEvent) -> String {
             ext.insert("deviceCustomString1Label", "client_guid".to_string());
 
             if let Some(src) = &na.src_endpoint
-                && let Some(ip) = &src.ip {
-                    ext.insert("src", ip.clone());
+                && let Some(ip) = &src.ip
+            {
+                ext.insert("src", ip.clone());
             }
             if let Some(info) = &na.connection_info {
                 ext.insert("app", info.protocol_name.clone());
@@ -96,7 +105,10 @@ mod tests {
     #[test]
     fn test_escape_cef() {
         assert_eq!(escape_cef_header("foo|bar\\baz"), "foo\\|bar\\\\baz");
-        assert_eq!(escape_cef_extension("key=value\\line\n"), "key\\=value\\\\line\\n");
+        assert_eq!(
+            escape_cef_extension("key=value\\line\n"),
+            "key\\=value\\\\line\\n"
+        );
     }
 
     #[test]
@@ -122,7 +134,10 @@ mod tests {
         };
 
         let cef = format_cef(&OcsfEvent::NetworkActivity(ev));
-        assert_eq!(cef, "CEF:0|OpenDXL|opendxl-siem-sensor|1.0|4001|Connect|1|deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=client-123 deviceCustomString1Label=client_guid");
+        assert_eq!(
+            cef,
+            "CEF:0|OpenDXL|opendxl-siem-sensor|1.0|4001|Connect|1|deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=client-123 deviceCustomString1Label=client_guid"
+        );
     }
 
     #[test]
@@ -159,6 +174,9 @@ mod tests {
         };
 
         let cef = format_cef(&OcsfEvent::NetworkActivity(ev));
-        assert_eq!(cef, "CEF:0|OpenDXL|opendxl-siem-sensor|1.0|4001|Connect|1|app=mqtt deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString1Label=client_guid deviceCustomString2=TLSv1.3 deviceCustomString2Label=tls_version deviceCustomString3=TLS_AES_256_GCM_SHA384 deviceCustomString3Label=cipher deviceCustomString4=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString4Label=cert_thumbprint src=172.17.0.1");
+        assert_eq!(
+            cef,
+            "CEF:0|OpenDXL|opendxl-siem-sensor|1.0|4001|Connect|1|app=mqtt deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString1Label=client_guid deviceCustomString2=TLSv1.3 deviceCustomString2Label=tls_version deviceCustomString3=TLS_AES_256_GCM_SHA384 deviceCustomString3Label=cipher deviceCustomString4=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString4Label=cert_thumbprint src=172.17.0.1"
+        );
     }
 }

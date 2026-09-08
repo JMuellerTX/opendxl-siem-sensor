@@ -68,22 +68,34 @@ impl DxlConfig {
             }
         };
 
-        let certs = conf.section(Some("Certs")).ok_or("Missing [Certs] section")?;
-        let broker_cert_chain = resolve_path(certs.get("BrokerCertChain").ok_or("Missing BrokerCertChain")?);
+        let certs = conf
+            .section(Some("Certs"))
+            .ok_or("Missing [Certs] section")?;
+        let broker_cert_chain = resolve_path(
+            certs
+                .get("BrokerCertChain")
+                .ok_or("Missing BrokerCertChain")?,
+        );
         let cert_file = resolve_path(certs.get("CertFile").ok_or("Missing CertFile")?);
         let private_key = resolve_path(certs.get("PrivateKey").ok_or("Missing PrivateKey")?);
 
-        let general = conf.section(Some("General")).ok_or("Missing [General] section")?;
-        let client_id = general.get("ClientId").map(|s| s.to_string()).unwrap_or_else(|| {
-            format!("{{{}}}", uuid::Uuid::new_v4().to_string().to_lowercase())
-        });
+        let general = conf
+            .section(Some("General"))
+            .ok_or("Missing [General] section")?;
+        let client_id = general
+            .get("ClientId")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{{{}}}", uuid::Uuid::new_v4().to_string().to_lowercase()));
         let tls_min_version = general.get("TlsMinVersion").unwrap_or("1.2").to_string();
-        let verify_hostname = general.get("VerifyHostname")
+        let verify_hostname = general
+            .get("VerifyHostname")
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false); // Off by default: broker certificates on real fabrics carry no matching SAN
         let tls_ciphers = general.get("TlsCiphers").map(|s| s.to_string());
 
-        let brokers_sec = conf.section(Some("Brokers")).ok_or("Missing [Brokers] section")?;
+        let brokers_sec = conf
+            .section(Some("Brokers"))
+            .ok_or("Missing [Brokers] section")?;
         let mut brokers = Vec::new();
         // The value is guid;port;host;ip
         for (_, v) in brokers_sec.iter() {
@@ -100,20 +112,24 @@ impl DxlConfig {
 
         let syslog = conf.section(Some("Syslog"));
         let syslog_host = syslog.and_then(|s| s.get("Host")).map(|s| s.to_string());
-        let syslog_port = syslog.and_then(|s| s.get("Port")).and_then(|p| p.parse().ok());
-        let syslog_protocol = syslog.and_then(|s| s.get("Protocol")).map(|s| s.to_string());
+        let syslog_port = syslog
+            .and_then(|s| s.get("Port"))
+            .and_then(|p| p.parse().ok());
+        let syslog_protocol = syslog
+            .and_then(|s| s.get("Protocol"))
+            .map(|s| s.to_string());
 
         let detections = conf.section(Some("Detections"));
         let service_ttl_grace_period_mins = detections
             .and_then(|d| d.get("ServiceTtlGracePeriodMins"))
             .and_then(|v| v.parse().ok())
             .unwrap_or(5);
-            
+
         let allowed_thumbprints = detections
             .and_then(|d| d.get("AllowedThumbprints"))
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
-            
+
         let sensitive_topics = detections
             .and_then(|d| d.get("SensitiveTopics"))
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
@@ -187,8 +203,16 @@ mod tests {
         writeln!(file, "[Brokers]").unwrap();
         writeln!(file, "mybroker=mybroker;8883;broker.local;192.168.1.10").unwrap();
         writeln!(file, "[Detections]").unwrap();
-        writeln!(file, "AllowedThumbprints=5a752ed6a24f6d2dd77634b0c68dd729b48d4613, a1b2c3d4").unwrap();
-        writeln!(file, "SensitiveTopics=/mcafee/service/tie/file/reputation/set").unwrap();
+        writeln!(
+            file,
+            "AllowedThumbprints=5a752ed6a24f6d2dd77634b0c68dd729b48d4613, a1b2c3d4"
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "SensitiveTopics=/mcafee/service/tie/file/reputation/set"
+        )
+        .unwrap();
         writeln!(file, "ServiceTtlGracePeriodMins=5").unwrap();
         writeln!(file, "[Syslog]").unwrap();
         writeln!(file, "Host=127.0.0.1").unwrap();
@@ -202,7 +226,10 @@ mod tests {
 
         let config = DxlConfig::load(file.path()).unwrap();
         assert_eq!(config.allowed_thumbprints.len(), 2);
-        assert_eq!(config.allowed_thumbprints[0], "5a752ed6a24f6d2dd77634b0c68dd729b48d4613");
+        assert_eq!(
+            config.allowed_thumbprints[0],
+            "5a752ed6a24f6d2dd77634b0c68dd729b48d4613"
+        );
         assert_eq!(config.service_ttl_grace_period_mins, 5);
         assert_eq!(config.syslog_host.unwrap(), "127.0.0.1");
         assert_eq!(config.webhook_url.unwrap(), "http://siem.local:8080/ingest");

@@ -34,7 +34,12 @@ impl DetectionEngine {
         }
     }
 
-    pub fn process_event(&mut self, topic: &str, payload: &serde_json::Value, source_client_id: &str) -> Vec<OcsfEvent> {
+    pub fn process_event(
+        &mut self,
+        topic: &str,
+        payload: &serde_json::Value,
+        source_client_id: &str,
+    ) -> Vec<OcsfEvent> {
         let mut alerts = Vec::new();
         let now = Utc::now().timestamp_millis();
         let metadata = OcsfMetadata::default();
@@ -43,61 +48,84 @@ impl DetectionEngine {
         if !self.allowed_thumbprints.is_empty() {
             // Check Connect events
             if topic.ends_with("/connect")
-                && let Some(cert_str) = payload.get("certThumbprint").and_then(|v| v.as_str())
-                    .or_else(|| payload.get("clientGuid").and_then(|v| v.as_str()).map(|g| g.split(':').next().unwrap_or(g)))
-                    && !self.allowed_thumbprints.contains(&cert_str.to_string()) {
+                && let Some(cert_str) = payload
+                    .get("certThumbprint")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        payload
+                            .get("clientGuid")
+                            .and_then(|v| v.as_str())
+                            .map(|g| g.split(':').next().unwrap_or(g))
+                    })
+                && !self.allowed_thumbprints.contains(&cert_str.to_string())
+            {
+                alerts.push(Self::build_detection(
+                    now,
+                    &metadata,
+                    "Unknown Certificate Thumbprint",
+                    &format!("Client connected with unknown thumbprint: {}", cert_str),
+                    Some(cert_str.to_string()),
+                ));
+            }
+
+            // Check publishers (ignore known brokers)
+            if !self.brokers.contains_key(source_client_id)
+                && !source_client_id.is_empty()
+                && !self
+                    .allowed_thumbprints
+                    .contains(&source_client_id.to_string())
+            {
+                alerts.push(Self::build_detection(
+                    now,
+                    &metadata,
+                    "Unknown Certificate Thumbprint",
+                    &format!("Publisher with unknown thumbprint: {}", source_client_id),
+                    Some(source_client_id.to_string()),
+                ));
+            }
+
+            if topic.ends_with("/register")
+                && let Some(certs) = payload.get("certificates").and_then(|v| v.as_array())
+            {
+                for cert in certs {
+                    if let Some(cert_str) = cert.as_str()
+                        && !self.allowed_thumbprints.contains(&cert_str.to_string())
+                    {
                         alerts.push(Self::build_detection(
                             now,
                             &metadata,
                             "Unknown Certificate Thumbprint",
-                            &format!("Client connected with unknown thumbprint: {}", cert_str),
+                            &format!("Service registered with unknown thumbprint: {}", cert_str),
                             Some(cert_str.to_string()),
                         ));
                     }
-
-            // Check publishers (ignore known brokers)
-            if !self.brokers.contains_key(source_client_id) && !source_client_id.is_empty()
-                && !self.allowed_thumbprints.contains(&source_client_id.to_string()) {
-                    alerts.push(Self::build_detection(
-                        now,
-                        &metadata,
-                        "Unknown Certificate Thumbprint",
-                        &format!("Publisher with unknown thumbprint: {}", source_client_id),
-                        Some(source_client_id.to_string()),
-                    ));
                 }
-
-            if topic.ends_with("/register")
-                && let Some(certs) = payload.get("certificates").and_then(|v| v.as_array()) {
-                    for cert in certs {
-                        if let Some(cert_str) = cert.as_str()
-                            && !self.allowed_thumbprints.contains(&cert_str.to_string()) {
-                                alerts.push(Self::build_detection(
-                                    now,
-                                    &metadata,
-                                    "Unknown Certificate Thumbprint",
-                                    &format!("Service registered with unknown thumbprint: {}", cert_str),
-                                    Some(cert_str.to_string()),
-                                ));
-                            }
-                    }
-                }
+            }
         }
-        
+
         // (f) Legacy Cipher Suite
         if topic.ends_with("/connect")
             && let Some(cipher) = payload.get("cipher").and_then(|v| v.as_str())
-                && cipher.starts_with("TLS_RSA_") && !cipher.contains("ECDHE") {
-                    let thumbprint = payload.get("certThumbprint").and_then(|v| v.as_str())
-                        .or_else(|| payload.get("clientGuid").and_then(|v| v.as_str()).map(|g| g.split(':').next().unwrap_or(g)));
-                    alerts.push(Self::build_detection(
-                        now,
-                        &metadata,
-                        "Legacy Cipher Suite",
-                        &format!("Client connected with weak legacy cipher: {}", cipher),
-                        thumbprint.map(|s| s.to_string()),
-                    ));
-                }
+            && cipher.starts_with("TLS_RSA_")
+            && !cipher.contains("ECDHE")
+        {
+            let thumbprint = payload
+                .get("certThumbprint")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    payload
+                        .get("clientGuid")
+                        .and_then(|v| v.as_str())
+                        .map(|g| g.split(':').next().unwrap_or(g))
+                });
+            alerts.push(Self::build_detection(
+                now,
+                &metadata,
+                "Legacy Cipher Suite",
+                &format!("Client connected with weak legacy cipher: {}", cipher),
+                thumbprint.map(|s| s.to_string()),
+            ));
+        }
 
         // Track for TTL (a)
         if topic.ends_with("/register") {
@@ -107,36 +135,60 @@ impl DetectionEngine {
                 payload.get("ttlMins").and_then(|v| v.as_u64()),
                 payload.get("registrationTime").and_then(|v| v.as_i64()),
             ) {
-                self.services.insert(guid.to_string(), ServiceState {
-                    guid: guid.to_string(),
-                    service_type: svc_type.to_string(),
-                    registration_time_secs: reg_time,
-                    ttl_mins: ttl as u32,
-                    reported: false,
-                });
+                self.services.insert(
+                    guid.to_string(),
+                    ServiceState {
+                        guid: guid.to_string(),
+                        service_type: svc_type.to_string(),
+                        registration_time_secs: reg_time,
+                        ttl_mins: ttl as u32,
+                        reported: false,
+                    },
+                );
             }
         } else if topic.ends_with("/unregister")
-            && let Some(guid) = payload.get("serviceGuid").and_then(|v| v.as_str()) {
-                self.services.remove(guid);
-            }
+            && let Some(guid) = payload.get("serviceGuid").and_then(|v| v.as_str())
+        {
+            self.services.remove(guid);
+        }
 
         // (c) Sensitive Topic Publisher
         for sensitive_topic in &self.sensitive_topics {
             // Very naive glob matching logic for topics
-            if topic == sensitive_topic || (sensitive_topic.ends_with("/#") && topic.starts_with(&sensitive_topic[..sensitive_topic.len() - 1])) {
+            if topic == sensitive_topic
+                || (sensitive_topic.ends_with("/#")
+                    && topic.starts_with(&sensitive_topic[..sensitive_topic.len() - 1]))
+            {
                 alerts.push(Self::build_detection(
                     now,
                     &metadata,
                     "Sensitive Topic Published",
-                    &format!("Client {} published to sensitive topic {}", source_client_id, topic),
+                    &format!(
+                        "Client {} published to sensitive topic {}",
+                        source_client_id, topic
+                    ),
                     Some(source_client_id.to_string()),
                 ));
             }
         }
 
         // (d) Rate/Size Anomaly (Simplified to simple count rate over 60s window)
-        Self::track_rate(&mut self.client_rates, source_client_id, now, &mut alerts, &metadata, "Client Rate Anomaly");
-        Self::track_rate(&mut self.topic_rates, topic, now, &mut alerts, &metadata, "Topic Rate Anomaly");
+        Self::track_rate(
+            &mut self.client_rates,
+            source_client_id,
+            now,
+            &mut alerts,
+            &metadata,
+            "Client Rate Anomaly",
+        );
+        Self::track_rate(
+            &mut self.topic_rates,
+            topic,
+            now,
+            &mut alerts,
+            &metadata,
+            "Topic Rate Anomaly",
+        );
 
         // (e) Fabric Change
         if topic.contains("fabricchange") || topic.contains("brokerregistry/brokerstate") {
@@ -165,13 +217,18 @@ impl DetectionEngine {
 
         for state in self.services.values_mut() {
             if !state.reported {
-                let expiry = state.registration_time_secs + (state.ttl_mins as i64 * 60) + (self.grace_period_mins as i64 * 60);
+                let expiry = state.registration_time_secs
+                    + (state.ttl_mins as i64 * 60)
+                    + (self.grace_period_mins as i64 * 60);
                 if now_secs > expiry {
                     alerts.push(Self::build_detection(
                         now_ms,
                         &metadata,
                         "Service TTL Expired",
-                        &format!("Service {} ({}) TTL expired without unregister", state.guid, state.service_type),
+                        &format!(
+                            "Service {} ({}) TTL expired without unregister",
+                            state.guid, state.service_type
+                        ),
                         None,
                     ));
                     state.reported = true;
@@ -181,7 +238,14 @@ impl DetectionEngine {
         alerts
     }
 
-    fn track_rate(rates: &mut HashMap<String, VecDeque<i64>>, key: &str, now: i64, alerts: &mut Vec<OcsfEvent>, metadata: &OcsfMetadata, title: &str) {
+    fn track_rate(
+        rates: &mut HashMap<String, VecDeque<i64>>,
+        key: &str,
+        now: i64,
+        alerts: &mut Vec<OcsfEvent>,
+        metadata: &OcsfMetadata,
+        title: &str,
+    ) {
         let entry = rates.entry(key.to_string()).or_default();
         entry.push_back(now);
         // Remove older than 60 seconds
@@ -192,7 +256,8 @@ impl DetectionEngine {
                 break;
             }
         }
-        if entry.len() > 100 { // Threshold: 100 msgs/min
+        if entry.len() > 100 {
+            // Threshold: 100 msgs/min
             alerts.push(Self::build_detection(
                 now,
                 metadata,
@@ -204,7 +269,13 @@ impl DetectionEngine {
         }
     }
 
-    fn build_detection(time: i64, metadata: &OcsfMetadata, title: &str, desc: &str, suser: Option<String>) -> OcsfEvent {
+    fn build_detection(
+        time: i64,
+        metadata: &OcsfMetadata,
+        title: &str,
+        desc: &str,
+        suser: Option<String>,
+    ) -> OcsfEvent {
         OcsfEvent::DetectionFinding(DetectionFinding {
             activity_id: 1,
             activity_name: "Create".to_string(),
@@ -238,13 +309,16 @@ impl DetectionEngine {
                     svc_info.get("ttlMins").and_then(|v| v.as_u64()),
                     svc_info.get("registrationTime").and_then(|v| v.as_i64()),
                 ) {
-                    self.services.insert(guid.to_string(), ServiceState {
-                        guid: guid.to_string(),
-                        service_type: svc_type.to_string(),
-                        registration_time_secs: reg_time,
-                        ttl_mins: ttl as u32,
-                        reported: false,
-                    });
+                    self.services.insert(
+                        guid.to_string(),
+                        ServiceState {
+                            guid: guid.to_string(),
+                            service_type: svc_type.to_string(),
+                            registration_time_secs: reg_time,
+                            ttl_mins: ttl as u32,
+                            reported: false,
+                        },
+                    );
                 }
             }
         }
@@ -277,7 +351,7 @@ mod tests {
     fn test_ttl_expiry() {
         let mut engine = DetectionEngine::new(&test_config());
         let now_secs = Utc::now().timestamp();
-        
+
         let payload = json!({
             "serviceGuid": "test-guid",
             "serviceType": "/test/service",
@@ -285,8 +359,12 @@ mod tests {
             "registrationTime": now_secs - 1000 // Expired > (10 + 5) * 60 = 900
         });
 
-        engine.process_event("/mcafee/event/dxl/svcregistry/register", &payload, "allowed_hash");
-        
+        engine.process_event(
+            "/mcafee/event/dxl/svcregistry/register",
+            &payload,
+            "allowed_hash",
+        );
+
         let alerts = engine.poll_timeouts();
         assert_eq!(alerts.len(), 1);
         if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
@@ -307,7 +385,11 @@ mod tests {
             "registrationTime": Utc::now().timestamp()
         });
 
-        let alerts = engine.process_event("/mcafee/event/dxl/svcregistry/register", &payload, "allowed_hash");
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/svcregistry/register",
+            &payload,
+            "allowed_hash",
+        );
         assert_eq!(alerts.len(), 1);
     }
 
@@ -322,7 +404,11 @@ mod tests {
             "certificates": ["unknown_hash"],
         });
 
-        let alerts = engine.process_event("/mcafee/event/dxl/svcregistry/register", &payload, "client-id");
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/svcregistry/register",
+            &payload,
+            "client-id",
+        );
         assert_eq!(alerts.len(), 0); // Should be empty since allowlist is empty
     }
 
@@ -330,7 +416,11 @@ mod tests {
     fn test_sensitive_topic() {
         let mut engine = DetectionEngine::new(&test_config());
         let payload = json!({});
-        let alerts = engine.process_event("/mcafee/service/tie/file/reputation", &payload, "allowed_hash");
+        let alerts = engine.process_event(
+            "/mcafee/service/tie/file/reputation",
+            &payload,
+            "allowed_hash",
+        );
         assert_eq!(alerts.len(), 1);
         if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
             assert_eq!(df.finding_info.title, "Sensitive Topic Published");
@@ -357,7 +447,8 @@ mod tests {
     fn test_fabric_change() {
         let mut engine = DetectionEngine::new(&test_config());
         let payload = json!({});
-        let alerts = engine.process_event("/mcafee/event/dxl/fabricchange", &payload, "allowed_hash");
+        let alerts =
+            engine.process_event("/mcafee/event/dxl/fabricchange", &payload, "allowed_hash");
         assert_eq!(alerts.len(), 1);
         if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
             assert_eq!(df.finding_info.title, "Fabric Change Detected");
@@ -372,7 +463,11 @@ mod tests {
         let payload = json!({
             "cipher": "TLS_RSA_WITH_AES_256_GCM_SHA384"
         });
-        let alerts = engine.process_event("/mcafee/event/dxl/clientregistry/connect", &payload, "allowed_hash");
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/clientregistry/connect",
+            &payload,
+            "allowed_hash",
+        );
         assert_eq!(alerts.len(), 1);
         if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
             assert_eq!(df.finding_info.title, "Legacy Cipher Suite");

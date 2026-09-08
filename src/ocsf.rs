@@ -37,16 +37,16 @@ pub struct NetworkActivity {
     pub class_name: String,
     pub severity_id: i32, // 1: Informational
     pub severity: String,
-    pub time: i64, // Epoch milliseconds
+    pub time: i64,     // Epoch milliseconds
     pub type_uid: i32, // 400101 for connect
     pub type_name: String,
     pub metadata: OcsfMetadata,
-    
+
     // Custom context
     pub src_endpoint: Option<OcsfEndpoint>,
     pub tls: Option<OcsfTls>,
     pub connection_info: Option<OcsfConnectionInfo>,
-    pub client_guid: String, // Split out (thumbprint)
+    pub client_guid: String,                  // Split out (thumbprint)
     pub client_instance_guid: Option<String>, // Full value
 }
 
@@ -87,11 +87,11 @@ pub struct ApiActivity {
     pub class_name: String,
     pub severity_id: i32, // 1: Informational
     pub severity: String,
-    pub time: i64, // Epoch milliseconds
+    pub time: i64,     // Epoch milliseconds
     pub type_uid: i32, // 600302 for create (register), 600304 for delete (unregister)
     pub type_name: String,
     pub metadata: OcsfMetadata,
-    
+
     pub api: OcsfApi,
     pub actor: Option<OcsfActor>,
 }
@@ -129,11 +129,11 @@ pub struct DetectionFinding {
     pub class_name: String,
     pub severity_id: i32, // 3: Medium, 4: High, 5: Critical, 6: Fatal
     pub severity: String,
-    pub time: i64, // Epoch milliseconds
+    pub time: i64,     // Epoch milliseconds
     pub type_uid: i32, // 200401
     pub type_name: String,
     pub metadata: OcsfMetadata,
-    
+
     pub finding_info: OcsfFindingInfo,
     pub suser: Option<String>,
 }
@@ -160,7 +160,7 @@ impl OcsfEvent {
             OcsfEvent::DetectionFinding(e) => e.class_uid,
         }
     }
-    
+
     pub fn event_name(&self) -> &str {
         match self {
             OcsfEvent::NetworkActivity(e) => &e.activity_name,

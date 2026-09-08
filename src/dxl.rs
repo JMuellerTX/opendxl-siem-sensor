@@ -13,31 +13,35 @@ pub struct DxlMessage {
     pub broker_ids: Vec<String>,
     pub client_ids: Vec<String>,
     pub payload: Vec<u8>,
-    
+
     // Request (0)
     pub reply_to_topic: Option<String>,
     pub service_id: Option<String>,
-    
+
     // Response (1) / Error (3)
     pub request_message_id: Option<String>,
     pub error_code: Option<i32>,
     pub error_message: Option<String>,
-    
+
     // version >= 1
     pub other_fields: HashMap<String, String>,
-    
+
     // version >= 2
     pub source_tenant_guid: Option<String>,
     pub destination_tenant_guids: Vec<String>,
-    
+
     // version >= 3
     pub source_client_instance_id: Option<String>,
 }
 
-#[allow(dead_code)] pub const MESSAGE_TYPE_REQUEST: u8 = 0;
-#[allow(dead_code)] pub const MESSAGE_TYPE_RESPONSE: u8 = 1;
-#[allow(dead_code)] pub const MESSAGE_TYPE_EVENT: u8 = 2;
-#[allow(dead_code)] pub const MESSAGE_TYPE_ERROR: u8 = 3;
+#[allow(dead_code)]
+pub const MESSAGE_TYPE_REQUEST: u8 = 0;
+#[allow(dead_code)]
+pub const MESSAGE_TYPE_RESPONSE: u8 = 1;
+#[allow(dead_code)]
+pub const MESSAGE_TYPE_EVENT: u8 = 2;
+#[allow(dead_code)]
+pub const MESSAGE_TYPE_ERROR: u8 = 3;
 
 fn read_u8<R: Read>(rd: &mut R) -> Result<u8, std::io::Error> {
     let mut buf = [0; 1];
@@ -90,23 +94,23 @@ fn read_string_array<R: Read>(rd: &mut R) -> Result<Vec<String>, Box<dyn std::er
 
 pub fn parse_dxl_message(raw: &[u8]) -> Result<DxlMessage, Box<dyn std::error::Error>> {
     let mut cursor = Cursor::new(raw);
-    
+
     let version: u8 = decode::read_int(&mut cursor)?;
     let message_type: u8 = decode::read_int(&mut cursor)?;
-    
+
     let message_id = read_string(&mut cursor)?;
     let source_client_id = read_string(&mut cursor)?;
     let source_broker_id = read_string(&mut cursor)?;
     let broker_ids = read_string_array(&mut cursor)?;
     let client_ids = read_string_array(&mut cursor)?;
     let payload = read_str_or_bin(&mut cursor)?;
-    
+
     let mut reply_to_topic = None;
     let mut service_id = None;
     let mut request_message_id = None;
     let mut error_code = None;
     let mut error_message = None;
-    
+
     if message_type == MESSAGE_TYPE_REQUEST {
         reply_to_topic = Some(read_string(&mut cursor)?);
         service_id = Some(read_string(&mut cursor)?);
@@ -119,7 +123,7 @@ pub fn parse_dxl_message(raw: &[u8]) -> Result<DxlMessage, Box<dyn std::error::E
         error_code = Some(decode::read_int(&mut cursor)?);
         error_message = Some(read_string(&mut cursor)?);
     }
-    
+
     let mut other_fields = HashMap::new();
     if version >= 1 {
         let len = decode::read_array_len(&mut cursor)?;
@@ -133,22 +137,25 @@ pub fn parse_dxl_message(raw: &[u8]) -> Result<DxlMessage, Box<dyn std::error::E
             }
         }
         if let Some(k) = key {
-            log::warn!("other_fields array had an odd length, ignoring trailing key: {}", k);
+            log::warn!(
+                "other_fields array had an odd length, ignoring trailing key: {}",
+                k
+            );
         }
     }
-    
+
     let mut source_tenant_guid = None;
     let mut destination_tenant_guids = Vec::new();
     if version >= 2 {
         source_tenant_guid = Some(read_string(&mut cursor)?);
         destination_tenant_guids = read_string_array(&mut cursor)?;
     }
-    
+
     let mut source_client_instance_id = None;
     if version >= 3 {
         source_client_instance_id = Some(read_string(&mut cursor)?);
     }
-    
+
     Ok(DxlMessage {
         version,
         message_type,
@@ -206,23 +213,27 @@ fn write_bytes(buf: &mut Vec<u8>, bytes: &[u8]) -> Result<(), std::io::Error> {
 #[allow(dead_code)]
 pub fn encode_dxl_message(msg: &DxlMessage) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut buf = Vec::new();
-    
+
     encode::write_uint(&mut buf, msg.version as u64)?;
     encode::write_uint(&mut buf, msg.message_type as u64)?;
-    
+
     write_string(&mut buf, &msg.message_id)?;
     write_string(&mut buf, &msg.source_client_id)?;
     write_string(&mut buf, &msg.source_broker_id)?;
-    
+
     encode::write_array_len(&mut buf, msg.broker_ids.len() as u32)?;
-    for bid in &msg.broker_ids { write_string(&mut buf, bid)?; }
-    
+    for bid in &msg.broker_ids {
+        write_string(&mut buf, bid)?;
+    }
+
     encode::write_array_len(&mut buf, msg.client_ids.len() as u32)?;
-    for cid in &msg.client_ids { write_string(&mut buf, cid)?; }
-    
+    for cid in &msg.client_ids {
+        write_string(&mut buf, cid)?;
+    }
+
     // Always encode payload as str/raw (use_bin_type=False equivalent)
     write_bytes(&mut buf, &msg.payload)?;
-    
+
     if msg.message_type == MESSAGE_TYPE_REQUEST {
         write_string(&mut buf, msg.reply_to_topic.as_deref().unwrap_or(""))?;
         write_string(&mut buf, msg.service_id.as_deref().unwrap_or(""))?;
@@ -235,7 +246,7 @@ pub fn encode_dxl_message(msg: &DxlMessage) -> Result<Vec<u8>, Box<dyn std::erro
         encode::write_sint(&mut buf, msg.error_code.unwrap_or(0) as i64)?;
         write_string(&mut buf, msg.error_message.as_deref().unwrap_or(""))?;
     }
-    
+
     if msg.version >= 1 {
         // flatten other_fields map into array
         encode::write_array_len(&mut buf, (msg.other_fields.len() * 2) as u32)?;
@@ -247,17 +258,22 @@ pub fn encode_dxl_message(msg: &DxlMessage) -> Result<Vec<u8>, Box<dyn std::erro
             write_string(&mut buf, msg.other_fields.get(k).unwrap())?;
         }
     }
-    
+
     if msg.version >= 2 {
         write_string(&mut buf, msg.source_tenant_guid.as_deref().unwrap_or(""))?;
         encode::write_array_len(&mut buf, msg.destination_tenant_guids.len() as u32)?;
-        for t in &msg.destination_tenant_guids { write_string(&mut buf, t)?; }
+        for t in &msg.destination_tenant_guids {
+            write_string(&mut buf, t)?;
+        }
     }
-    
+
     if msg.version >= 3 {
-        write_string(&mut buf, msg.source_client_instance_id.as_deref().unwrap_or(""))?;
+        write_string(
+            &mut buf,
+            msg.source_client_instance_id.as_deref().unwrap_or(""),
+        )?;
     }
-    
+
     Ok(buf)
 }
 
@@ -284,7 +300,7 @@ mod tests {
         });
         let file = File::open(&golden_path).unwrap();
         let reader = BufReader::new(file);
-        
+
         for line in reader.lines() {
             let line = line.unwrap();
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -292,10 +308,12 @@ mod tests {
                 let name = parts[0];
                 let hex = parts[1];
                 let raw_bytes = from_hex(hex);
-                
-                let parsed = parse_dxl_message(&raw_bytes).unwrap_or_else(|_| panic!("Failed to parse {}", name));
-                let encoded = encode_dxl_message(&parsed).unwrap_or_else(|_| panic!("Failed to encode {}", name));
-                
+
+                let parsed = parse_dxl_message(&raw_bytes)
+                    .unwrap_or_else(|_| panic!("Failed to parse {}", name));
+                let encoded = encode_dxl_message(&parsed)
+                    .unwrap_or_else(|_| panic!("Failed to encode {}", name));
+
                 assert_eq!(raw_bytes, encoded, "Roundtrip failed for vector {}", name);
             }
         }

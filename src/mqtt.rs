@@ -1,26 +1,22 @@
 use crate::tls::NoHostnameVerifier;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rumqttc::{MqttOptions, Transport};
 use rustls::RootCertStore;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::certs;
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::Arc;
-use rumqttc::{MqttOptions, Transport};
 
 #[allow(dead_code)]
 pub fn load_certs(path: &str) -> Vec<CertificateDer<'static>> {
     let mut reader = BufReader::new(File::open(path).unwrap());
-    certs(&mut reader)
-        .map(|result| result.unwrap())
-        .collect()
+    certs(&mut reader).map(|result| result.unwrap()).collect()
 }
 
 #[allow(dead_code)]
 pub fn load_keys(path: &str) -> PrivateKeyDer<'static> {
     let mut reader = BufReader::new(File::open(path).unwrap());
-    rustls_pemfile::private_key(&mut reader)
-        .unwrap()
-        .unwrap()
+    rustls_pemfile::private_key(&mut reader).unwrap().unwrap()
 }
 
 #[allow(dead_code)]
@@ -46,8 +42,9 @@ pub fn build_mqtt_options(
         .unwrap();
 
     if !verify_hostname {
-        client_config.dangerous()
-            .set_certificate_verifier(Arc::new(NoHostnameVerifier::new(Arc::new(root_store)).unwrap()));
+        client_config.dangerous().set_certificate_verifier(Arc::new(
+            NoHostnameVerifier::new(Arc::new(root_store)).unwrap(),
+        ));
     }
 
     let mut mqttoptions = MqttOptions::new(client_id, host, port);
@@ -66,13 +63,18 @@ mod tests {
         let config_dir = match std::env::var("DXL_SENSOR_TEST_CONFIG_DIR") {
             Ok(dir) => dir,
             Err(_) => {
-                println!("Skipping test_connectivity_dxl_modern: DXL_SENSOR_TEST_CONFIG_DIR not set");
+                println!(
+                    "Skipping test_connectivity_dxl_modern: DXL_SENSOR_TEST_CONFIG_DIR not set"
+                );
                 return;
             }
         };
         let ca_path = format!("{}/ca-bundle.crt", config_dir);
         if !std::path::Path::new(&ca_path).exists() {
-            println!("Skipping test_connectivity_dxl_modern: ca-bundle.crt not found in {}", config_dir);
+            println!(
+                "Skipping test_connectivity_dxl_modern: ca-bundle.crt not found in {}",
+                config_dir
+            );
             return;
         }
 
@@ -88,8 +90,10 @@ mod tests {
         mqttoptions.set_keep_alive(Duration::from_secs(5));
 
         let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
-        let _ = client.subscribe("/mcafee/test", rumqttc::QoS::AtMostOnce).await;
-        
+        let _ = client
+            .subscribe("/mcafee/test", rumqttc::QoS::AtMostOnce)
+            .await;
+
         // Just poll once to ensure connection is established
         if let Ok(event) = eventloop.poll().await {
             println!("Received event: {:?}", event);
@@ -98,12 +102,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_tls_versions_g9() {
+        use crate::tls::NoHostnameVerifier;
+        use rustls::ClientConfig;
+        use rustls::pki_types::ServerName;
         use std::sync::Arc;
         use tokio::net::TcpStream;
         use tokio_rustls::TlsConnector;
-        use rustls::ClientConfig;
-        use rustls::pki_types::ServerName;
-        use crate::tls::NoHostnameVerifier;
 
         let config_modern = std::env::var("DXL_SENSOR_TEST_CONFIG_DIR");
         let config_tls13 = std::env::var("DXL_SENSOR_TEST_CONFIG_DIR_TLS13");
@@ -111,25 +115,27 @@ mod tests {
         let mut configs = Vec::new();
         if let Ok(dir) = config_modern {
             configs.push((
-                "dxl-modern (TLS 1.2)", 
-                18883, 
+                "dxl-modern (TLS 1.2)",
+                18883,
                 dir,
                 "opendxl-siem-sensor",
-                rustls::version::TLS12.version
+                rustls::version::TLS12.version,
             ));
         }
         if let Ok(dir) = config_tls13 {
             configs.push((
-                "dxl-tls13 (TLS 1.3)", 
-                58883, 
+                "dxl-tls13 (TLS 1.3)",
+                58883,
                 dir,
                 "opendxl-siem-sensor-tls13",
-                rustls::version::TLS13.version
+                rustls::version::TLS13.version,
             ));
         }
 
         if configs.is_empty() {
-            println!("Skipping test_tls_versions_g9: Environment variables for test configs not set");
+            println!(
+                "Skipping test_tls_versions_g9: Environment variables for test configs not set"
+            );
             return;
         }
 
@@ -150,7 +156,7 @@ mod tests {
             let client_key = load_keys(&format!("{}/client.key", path));
 
             let verifier = NoHostnameVerifier::new(Arc::new(root_store)).unwrap();
-            
+
             let client_config = ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(verifier))
@@ -158,37 +164,47 @@ mod tests {
                 .unwrap();
 
             let connector = TlsConnector::from(Arc::new(client_config));
-            let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await.unwrap();
+            let stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+                .await
+                .unwrap();
             let domain = ServerName::try_from("localhost").unwrap();
-            
+
             let tls_stream = connector.connect(domain, stream).await.unwrap();
             let (_, connection) = tls_stream.into_inner();
-            
+
             println!("--- {} ---", name);
             println!("Protocol: {:?}", connection.protocol_version().unwrap());
-            println!("Cipher: {:?}", connection.negotiated_cipher_suite().unwrap().suite());
+            println!(
+                "Cipher: {:?}",
+                connection.negotiated_cipher_suite().unwrap().suite()
+            );
         }
     }
 
     #[tokio::test]
     async fn test_tls13_min_version_against_modern() {
+        use crate::tls::NoHostnameVerifier;
+        use rustls::ClientConfig;
+        use rustls::pki_types::ServerName;
         use std::sync::Arc;
         use tokio::net::TcpStream;
         use tokio_rustls::TlsConnector;
-        use rustls::ClientConfig;
-        use rustls::pki_types::ServerName;
-        use crate::tls::NoHostnameVerifier;
 
         let path = match std::env::var("DXL_SENSOR_TEST_CONFIG_DIR") {
             Ok(dir) => dir,
             Err(_) => {
-                println!("Skipping test_tls13_min_version_against_modern: DXL_SENSOR_TEST_CONFIG_DIR not set");
+                println!(
+                    "Skipping test_tls13_min_version_against_modern: DXL_SENSOR_TEST_CONFIG_DIR not set"
+                );
                 return;
             }
         };
         let ca_path = format!("{}/ca-bundle.crt", path);
         if !std::path::Path::new(&ca_path).exists() {
-            println!("Skipping test_tls13_min_version_against_modern: config not found in {}", path);
+            println!(
+                "Skipping test_tls13_min_version_against_modern: config not found in {}",
+                path
+            );
             return;
         }
 
@@ -202,19 +218,23 @@ mod tests {
         let client_key = load_keys(&format!("{}/client.key", path));
 
         let verifier = NoHostnameVerifier::new(Arc::new(root_store)).unwrap();
-        
-        let client_config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(verifier))
-            .with_client_auth_cert(client_certs, client_key)
-            .unwrap();
+
+        let client_config =
+            ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier))
+                .with_client_auth_cert(client_certs, client_key)
+                .unwrap();
 
         let connector = TlsConnector::from(Arc::new(client_config));
         let stream = TcpStream::connect("127.0.0.1:18883").await.unwrap();
         let domain = ServerName::try_from("localhost").unwrap();
-        
+
         let result = connector.connect(domain, stream).await;
-        println!("TLS 1.3 min version against dxl-modern result: {:?}", result);
+        println!(
+            "TLS 1.3 min version against dxl-modern result: {:?}",
+            result
+        );
         assert!(result.is_err());
     }
 }

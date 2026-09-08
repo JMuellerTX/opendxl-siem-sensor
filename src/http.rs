@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 pub async fn start_http_sender(config: &DxlConfig) -> Option<mpsc::Sender<OcsfEvent>> {
     let url = config.webhook_url.clone()?;
     let (tx, mut rx) = mpsc::channel::<OcsfEvent>(1000);
-    
+
     info!("Starting HTTP Webhook sender to {}", url);
     let client = Client::new();
 

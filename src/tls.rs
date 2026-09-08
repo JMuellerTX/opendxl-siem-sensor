@@ -1,9 +1,9 @@
+use rustls::RootCertStore;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::TrustAnchor;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error, SignatureScheme};
 use std::sync::Arc;
-use rustls::RootCertStore;
-use rustls::pki_types::TrustAnchor;
 use webpki::{EndEntityCert, KeyUsage};
 
 #[derive(Debug)]
@@ -30,20 +30,23 @@ impl ServerCertVerifier for NoHostnameVerifier {
         _ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        let cert = EndEntityCert::try_from(end_entity)
-            .map_err(|e| Error::General(format!("{:?}", e)))?;
-            
-        let trust_anchors: Vec<TrustAnchor> = self.roots.roots.iter().map(|ta| {
-            TrustAnchor {
+        let cert =
+            EndEntityCert::try_from(end_entity).map_err(|e| Error::General(format!("{:?}", e)))?;
+
+        let trust_anchors: Vec<TrustAnchor> = self
+            .roots
+            .roots
+            .iter()
+            .map(|ta| TrustAnchor {
                 subject: ta.subject.clone(),
                 subject_public_key_info: ta.subject_public_key_info.clone(),
                 name_constraints: ta.name_constraints.clone(),
-            }
-        }).collect();
+            })
+            .collect();
 
         // Use the provider's algorithms
         let provider = rustls::crypto::aws_lc_rs::default_provider();
-        
+
         cert.verify_for_usage(
             provider.signature_verification_algorithms.all,
             &trust_anchors,
@@ -52,16 +55,27 @@ impl ServerCertVerifier for NoHostnameVerifier {
             KeyUsage::server_auth(),
             None,
             None,
-        ).map_err(|e| Error::General(format!("{:?}", e)))?;
+        )
+        .map_err(|e| Error::General(format!("{:?}", e)))?;
 
         Ok(ServerCertVerified::assertion())
     }
 
-    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
         self.inner.verify_tls12_signature(message, cert, dss)
     }
 
-    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
         self.inner.verify_tls13_signature(message, cert, dss)
     }
 
