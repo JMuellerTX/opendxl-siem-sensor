@@ -118,11 +118,43 @@ In addition to detections, regular audit events are logged, e.g., Network Connec
 
 ## Operation
 
-- **Starting:** `DXL_CONFIG=/path/to/dxlclient.config ./opendxl-siem-sensor`
-- **Exit Codes:** 
-  - `0`: Normal exit.
-  - `2`: Error loading the configuration (e.g., path not found or invalid INI).
-- **Logging:** The sensor uses `env_logger`. Log levels can be controlled via `RUST_LOG` (e.g., `RUST_LOG=info`).
+The sensor follows a fabric the way `tail -f` follows a file: one record per
+line on stdout, until interrupted. Diagnostics go to stderr, so the stream can
+be piped.
+
+```sh
+opendxl-siem-sensor dxlclient.config                 # CEF, everything
+opendxl-siem-sensor -c dxlclient.config -f plain     # human readable
+opendxl-siem-sensor -f json | jq 'select(.severity_id >= 4)'
+opendxl-siem-sensor --only detections | tee alerts.cef
+```
+
+```text
+USAGE:
+    opendxl-siem-sensor [OPTIONS] [CONFIG]
+
+OPTIONS:
+    -c, --config <FILE>   Client configuration file
+    -f, --format <FMT>    cef (default) | json | plain
+    -o, --only <WHAT>     all (default) | events | detections
+    -q, --quiet           Do not write progress to stderr
+    -h, --help            Print help
+    -V, --version         Print the version
+```
+
+- **Where the configuration comes from:** `-c/--config`, then the positional
+  argument, then `DXL_CONFIG`, in that order of precedence.
+- **Formats:** `cef` is the ArcSight line that also goes to syslog; `json` is
+  the OCSF record on a single line, for `jq` and file-based ingestion; `plain`
+  is time, severity, event and the client it concerns, for reading along.
+  Records are flushed line by line - a sensor that buffers is a sensor whose
+  last line arrives after the incident. `--format` and `--only` shape the
+  terminal stream only; syslog, HTTP and Kafka forwarding is unaffected.
+- **Exit Codes:**
+  - `0`: Normal exit, including `--help`, `--version`, and a closed stdout
+    (which is how `| head` ends).
+  - `2`: No configuration given, or the configuration could not be loaded.
+- **Logging:** `env_logger`, controlled by `RUST_LOG`. Without it the sensor logs at info level, or at warning level with `--quiet`.
 - **Connect Events:** By default, brokers (Trellix and OSS) do not publish events for simple client connections. The sensor is designed to be fault-tolerant and operates reliably without these events, as service registrations (`svcregistry`) serve as the primary source of truth. To utilize connect events for client visibility and legacy cipher detections, the modified broker fork must have `DXL_SEND_CONNECT_EVENTS=true` enabled.
 
 ## Tests

@@ -1,3 +1,4 @@
+mod cli;
 mod config;
 mod dxl;
 mod mqtt;
@@ -9,6 +10,7 @@ pub mod detections;
 pub mod http;
 pub mod kafka;
 
+use cli::{Cli, Format, Kind, ParseOutcome};
 use config::DxlConfig;
 use dxl::{encode_dxl_message, parse_dxl_message, DxlMessage, MESSAGE_TYPE_REQUEST};
 use log::{error, info};
@@ -18,20 +20,46 @@ use std::time::Duration;
 use uuid::Uuid;
 use ocsf::{OcsfEvent, NetworkActivity, ApiActivity, OcsfMetadata, OcsfApi, OcsfService, OcsfActor, OcsfUser};
 use cef::format_cef;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use detections::DetectionEngine;
+use std::io::Write;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+    let cli = match Cli::from_env() {
+        Ok(cli) => cli,
+        // --help and --version are answers, not failures: they belong on stdout
+        // and exit 0, so `opendxl-siem-sensor --help | less` behaves.
+        Err(outcome @ (ParseOutcome::Help | ParseOutcome::Version)) => {
+            println!("{outcome}");
+            return Ok(());
+        }
+        Err(outcome) => {
+            eprintln!("{outcome}");
+            eprintln!();
+            eprint!("{}", cli::USAGE);
+            std::process::exit(2);
+        }
+    };
+
+    let mut logger = env_logger::Builder::from_default_env();
+    if std::env::var_os("RUST_LOG").is_none() {
+        logger.filter_level(if cli.quiet {
+            log::LevelFilter::Warn
+        } else {
+            log::LevelFilter::Info
+        });
+    }
+    logger.init();
     info!("Starting OpenDXL SIEM Sensor v1 (Rust)");
 
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| {
-        std::env::var("DXL_CONFIG").unwrap_or_else(|_| {
-            eprintln!("Error: DXL_CONFIG environment variable not set and no config path provided via CLI");
-            std::process::exit(2);
-        })
-    });
+    let Some(config_path) = cli.config.clone() else {
+        eprintln!("Error: no client configuration given.");
+        eprintln!("Pass it as an argument, with -c/--config, or in DXL_CONFIG.");
+        eprintln!();
+        eprint!("{}", cli::USAGE);
+        std::process::exit(2);
+    };
     info!("Loading config from: {}", config_path);
     
     let config = DxlConfig::load(&config_path).unwrap_or_else(|e| {
@@ -114,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Normalise and Detect
                             if let Some(ocsf_event) = handle_dxl_message(&publish.topic, &msg, &detection_engine) {
                                 let cef_str = format_cef(&ocsf_event);
-                                println!("Syslog Output (Normal): {}", cef_str);
+                                emit(&cli, &ocsf_event, &cef_str, Kind::Event);
                                 
                                 if let Some(tx) = &syslog_tx {
                                     let _ = tx.send(cef_str).await;
@@ -140,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let alerts = detection_engine.process_event(&publish.topic, &value, &msg.source_client_id);
                                         for alert in alerts {
                                             let cef_str = format_cef(&alert);
-                                            println!("Syslog Output (Detection): {}", cef_str);
+                                            emit(&cli, &alert, &cef_str, Kind::Detection);
                                             if let Some(tx) = &syslog_tx {
                                                 let _ = tx.send(cef_str).await;
                                             }
@@ -180,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let alerts = detection_engine.poll_timeouts();
             for alert in alerts {
                 let cef_str = format_cef(&alert);
-                println!("Syslog Output (Detection Timeout): {}", cef_str);
+                emit(&cli, &alert, &cef_str, Kind::Detection);
                 if let Some(tx) = &syslog_tx {
                     let _ = tx.send(cef_str).await;
                 }
@@ -194,6 +222,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_poll = now;
         }
     }
+}
+
+/// Writes one record to stdout in the requested shape, or nothing when the
+/// record is filtered out.
+///
+/// stdout carries records and nothing else - the prefixes this used to print
+/// made the stream unusable in a pipe. Every line is flushed, because a sensor
+/// that buffers is a sensor whose last line arrives after the incident.
+fn emit(cli: &Cli, event: &OcsfEvent, cef: &str, kind: Kind) {
+    if !cli.wants(kind) {
+        return;
+    }
+    let line = match cli.format {
+        Format::Cef => cef.to_string(),
+        Format::Json => match serde_json::to_string(event) {
+            Ok(json) => json,
+            Err(e) => {
+                error!("Could not serialise record: {}", e);
+                return;
+            }
+        },
+        Format::Plain => plain(event, kind),
+    };
+    let mut out = std::io::stdout().lock();
+    if writeln!(out, "{line}").is_err() || out.flush().is_err() {
+        // A closed stdout is how `| head` ends: leave quietly rather than
+        // filling stderr with broken-pipe noise for every later record.
+        std::process::exit(0);
+    }
+}
+
+/// Human readable one-liner: when, how bad, what, and who it was about.
+fn plain(event: &OcsfEvent, kind: Kind) -> String {
+    let when = Utc
+        .timestamp_millis_opt(event.time())
+        .single()
+        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "------ --:--:--".to_string());
+    let marker = match kind {
+        Kind::Detection => "!",
+        Kind::Event => " ",
+    };
+    let who = event.principal().unwrap_or("-");
+    format!(
+        "{when} {marker} {:<13} {:<34} {who}",
+        event.severity(),
+        event.event_name()
+    )
 }
 
 fn handle_dxl_message(topic: &str, msg: &DxlMessage, engine: &DetectionEngine) -> Option<OcsfEvent> {

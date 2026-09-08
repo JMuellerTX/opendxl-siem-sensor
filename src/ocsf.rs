@@ -176,6 +176,34 @@ impl OcsfEvent {
             OcsfEvent::DetectionFinding(e) => e.severity_id,
         }
     }
+
+    /// Event time in epoch milliseconds.
+    pub fn time(&self) -> i64 {
+        match self {
+            OcsfEvent::NetworkActivity(e) => e.time,
+            OcsfEvent::ApiActivity(e) => e.time,
+            OcsfEvent::DetectionFinding(e) => e.time,
+        }
+    }
+
+    pub fn severity(&self) -> &str {
+        match self {
+            OcsfEvent::NetworkActivity(e) => &e.severity,
+            OcsfEvent::ApiActivity(e) => &e.severity,
+            OcsfEvent::DetectionFinding(e) => &e.severity,
+        }
+    }
+
+    /// Who the record is about: the client for a connection, the client that
+    /// called for an API activity, the subject for a detection. Used by the
+    /// human readable output; `None` when the payload did not name anyone.
+    pub fn principal(&self) -> Option<&str> {
+        match self {
+            OcsfEvent::NetworkActivity(e) => Some(e.client_guid.as_str()),
+            OcsfEvent::ApiActivity(e) => e.actor.as_ref().map(|a| a.user.uid.as_str()),
+            OcsfEvent::DetectionFinding(e) => e.suser.as_deref(),
+        }
+    }
 }
 
 #[cfg(test)]
