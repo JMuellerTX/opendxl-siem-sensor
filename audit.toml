@@ -1,0 +1,24 @@
+# cargo-audit configuration.
+#
+# One advisory is ignored, with the reasoning written down rather than
+# implied. Everything else fails the build.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2024-0421 / GHSA-82j2-j2ch-gfr8 - rustls-webpki 0.102.8.
+    #
+    # Two copies of rustls-webpki are in the tree. The one this sensor
+    # validates certificates with is 0.103, declared in Cargo.toml and used by
+    # the verifier in src/tls.rs. The flagged 0.102.8 comes in through
+    # rumqttc 0.25.1, which declares `rustls-webpki ^0.102.8` behind its
+    # use-rustls feature - the same feature that provides the TLS transport
+    # this sensor needs, so it cannot be turned off separately.
+    #
+    # Checked 2026-09-08: rumqttc 0.25.1 is the latest release, and 0.102.8 is
+    # the last 0.102.x, so there is no version in that range to move to. The
+    # fix has to come from rumqttc.
+    #
+    # Re-check when rumqttc publishes again, and delete this entry the moment
+    # `cargo tree -i rustls-webpki@0.102.8` comes back empty.
+    "RUSTSEC-2024-0421",
+]

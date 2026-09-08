@@ -1,0 +1,90 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron:  '0 0 * * *'
+
+jobs:
+  build:
+    # Everything here runs without a broker. The tests that need one skip
+    # themselves when DXL_SENSOR_TEST_CONFIG_DIR and DXL_SENSOR_TEST_CONFIG_TLS13
+    # are unset, which is the case on a hosted runner - see README, "Tests".
+    name: rust ${{ matrix.toolchain }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # stable is the contract; beta is the early warning for the next one.
+        toolchain: [stable, beta]
+      fail-fast: false
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust ${{ matrix.toolchain }}
+      run: |
+        rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component rustfmt,clippy
+        rustup default ${{ matrix.toolchain }}
+        rustc --version && cargo --version
+
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: cargo-${{ matrix.toolchain }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: cargo-${{ matrix.toolchain }}-
+
+    - name: Format
+      run: cargo fmt --check
+
+    - name: Clippy
+      run: cargo clippy --all-targets -- -D warnings
+
+    - name: Build
+      run: cargo build --locked
+
+    - name: Test
+      run: cargo test --locked
+
+    # The Kafka output is optional because rdkafka-sys builds librdkafka from
+    # source and therefore needs a C toolchain - which is why it does not build
+    # on a plain Windows checkout. A Linux runner can, so the feature is
+    # compiled here once and cannot rot unnoticed.
+    - name: Check the optional Kafka feature
+      if: matrix.toolchain == 'stable'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends cmake libsasl2-dev libssl-dev pkg-config
+        cargo check --locked --features rdkafka
+
+    - name: The CLI answers for itself
+      run: |
+        set -eu
+        cargo run --locked --quiet -- --version
+        cargo run --locked --quiet -- --help > /dev/null
+        # No configuration anywhere must fail with 2, not with a panic or a 101.
+        set +e
+        env -u DXL_CONFIG cargo run --locked --quiet -- > /dev/null 2>&1
+        code=$?
+        set -e
+        [ "$code" -eq 2 ] || { echo "expected exit 2 without a config, got $code"; exit 1; }
+
+  audit:
+    # Advisories are a separate job on purpose: a new advisory should be visible
+    # as its own red mark, not hidden inside a build failure. audit.toml carries
+    # the one accepted exception together with the reasoning and the condition
+    # for removing it.
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install cargo-audit
+      run: cargo install cargo-audit --locked
+    - name: Audit
+      run: cargo audit --file Cargo.lock
