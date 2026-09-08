@@ -72,8 +72,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(2);
     });
-    let broker = config.brokers.first().expect("No brokers configured");
+    let Some(broker) = config.brokers.first() else {
+        eprintln!(
+            "Error: {} lists no brokers in its [Brokers] section.",
+            config_path
+        );
+        std::process::exit(2);
+    };
 
+    // Exit code 2, the same as a configuration that cannot be read: a wrong
+    // path or an unreadable certificate is a configuration problem, and the
+    // message has to name the file. A panic here would print a backtrace to
+    // someone who is looking at a provisioning directory, not at this source.
     let mut mqttoptions = build_mqtt_options(
         &config.client_id,
         &broker.ip,
@@ -82,7 +92,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.cert_file,
         &config.private_key,
         config.verify_hostname,
-    );
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(2);
+    });
 
     mqttoptions.set_keep_alive(Duration::from_secs(60));
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 100);
