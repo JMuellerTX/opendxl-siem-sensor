@@ -21,6 +21,12 @@
 # 0.102.8 is the last 0.102.x, so there is no version in that range to move to.
 # The fix has to come from rumqttc.
 #
+# Re-checked 2026-09-21, by running it rather than re-reading this comment:
+#   cargo tree -i rustls-webpki@0.102.8  -> still only via rumqttc 0.25.1
+#   cargo search rumqttc                 -> 0.25.1 is still the latest
+#   cargo update -p rumqttc              -> Locking 0 packages
+# Unchanged. Re-check the same way before trusting this list again.
+#
 # Delete every entry below the moment `cargo tree -i rustls-webpki@0.102.8`
 # comes back empty.
 
