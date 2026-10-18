@@ -15,6 +15,11 @@ fn normalize_identity(id: &str) -> String {
         .to_ascii_lowercase()
 }
 
+pub fn is_hex_thumbprint(id: &str) -> bool {
+    let head = id.trim().split(':').next().unwrap_or("");
+    head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 pub const TOPIC_CLIENT_CONNECT: &str = "/mcafee/event/dxl/clientregistry/connect";
 pub const TOPIC_CLIENT_DISCONNECT: &str = "/mcafee/event/dxl/clientregistry/disconnect";
 pub const TOPIC_SVC_REGISTER: &str = "/mcafee/event/dxl/svcregistry/register";
@@ -135,8 +140,31 @@ impl DetectionEngine {
                 ));
                 return alerts;
             }
-            if !self.brokers.is_empty()
-                && topic != TOPIC_BROKER_STATE
+            if topic == TOPIC_BROKER_STATE {
+                let claimed_guid = payload.get("guid").and_then(|v| v.as_str());
+                let guid_mismatch = !source_client_id.is_empty()
+                    && claimed_guid.is_some_and(|g| g != source_client_id);
+                if is_hex_thumbprint(source_client_id)
+                    || claimed_guid.is_some_and(is_hex_thumbprint)
+                    || guid_mismatch
+                {
+                    alerts.push(Self::build_detection(
+                        now,
+                        &metadata,
+                        "Spoofed Broker Event",
+                        &format!(
+                            "Non-broker client {} attempted to spoof brokerstate event",
+                            source_client_id
+                        ),
+                        if source_client_id.is_empty() {
+                            None
+                        } else {
+                            Some(source_client_id.to_string())
+                        },
+                    ));
+                    return alerts;
+                }
+            } else if !self.brokers.is_empty()
                 && !source_client_id.is_empty()
                 && !self.brokers.contains_key(source_client_id)
             {
@@ -608,8 +636,10 @@ impl DetectionEngine {
         if let Some(brokers) = payload.get("brokers").and_then(|v| v.as_object()) {
             let mut seen = HashSet::new();
             for (guid, broker_info) in brokers {
-                seen.insert(guid.to_string());
-                self.brokers.insert(guid.to_string(), broker_info.clone());
+                if !is_hex_thumbprint(guid) {
+                    seen.insert(guid.to_string());
+                    self.brokers.insert(guid.to_string(), broker_info.clone());
+                }
             }
             self.brokers.retain(|k, _| seen.contains(k));
         }
@@ -1124,6 +1154,30 @@ mod tests {
                     .desc
                     .contains("{68125cd6-a5d8-11e6-348e-000c29663178}")
             );
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+    }
+
+    #[test]
+    fn test_brokerstate_spoofing_rejected_without_poisoning_brokers_map() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let attacker_thumb = "5a752ed6a24f6d2dd77634b0c68dd729b48d4613";
+        let spoof_state = json!({
+            "guid": attacker_thumb,
+            "bridges": [],
+            "startTime": 1700000000
+        });
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/brokerregistry/brokerstate",
+            &spoof_state,
+            attacker_thumb,
+        );
+        assert_eq!(alerts.len(), 1);
+        assert!(!engine.brokers.contains_key(attacker_thumb));
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Spoofed Broker Event");
+            assert_eq!(df.suser.as_deref(), Some(attacker_thumb));
         } else {
             panic!("Expected DetectionFinding");
         }

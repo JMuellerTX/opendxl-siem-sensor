@@ -7,6 +7,9 @@ pub fn escape_cef_header(value: &str) -> String {
         .replace('|', "\\|")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 
 pub fn escape_cef_extension(value: &str) -> String {
@@ -15,6 +18,9 @@ pub fn escape_cef_extension(value: &str) -> String {
         .replace('=', "\\=")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 
 pub fn format_cef(event: &OcsfEvent) -> String {

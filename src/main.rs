@@ -156,9 +156,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Feed into Detection Engine (preserve plain-text UTF-8 payloads such as revocation/list)
                             let payload_json = decode_payload_value(&msg.payload);
 
-                            if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE
+                            let has_client_certs = msg
+                                .other_fields
+                                .get("dxl.certs")
+                                .is_some_and(|certs| !certs.trim().is_empty());
+                            let is_authentic_broker_reply = publish.topic == reply_to_topic
+                                && msg.message_type == dxl::MESSAGE_TYPE_RESPONSE
+                                && !has_client_certs
+                                && !detections::is_hex_thumbprint(&msg.source_client_id);
+
+                            if is_authentic_broker_reply
+                                && !svc_query_msg_id.is_empty()
                                 && msg.request_message_id.as_ref() == Some(&svc_query_msg_id)
                             {
+                                svc_query_msg_id.clear();
                                 if let Some(value) = &payload_json {
                                     let alerts = detection_engine.process_sync_response(value);
                                     info!(
@@ -176,9 +187,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         );
                                     }
                                 }
-                            } else if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE
+                            } else if is_authentic_broker_reply
+                                && !broker_query_msg_id.is_empty()
                                 && msg.request_message_id.as_ref() == Some(&broker_query_msg_id)
                             {
+                                broker_query_msg_id.clear();
                                 if let Some(value) = &payload_json {
                                     detection_engine.process_broker_sync_response(value);
                                     info!(
@@ -437,6 +450,12 @@ fn emit(cli: &Cli, event: &OcsfEvent, cef: &str, kind: Kind) {
     }
 }
 
+fn sanitize_plain_field(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// Human readable one-liner: when, how bad, what, and who it was about.
 fn plain(event: &OcsfEvent, kind: Kind) -> String {
     let when = Utc
@@ -448,12 +467,10 @@ fn plain(event: &OcsfEvent, kind: Kind) -> String {
         Kind::Detection => "!",
         Kind::Event => " ",
     };
-    let who = event.principal().unwrap_or("-");
-    format!(
-        "{when} {marker} {:<13} {:<34} {who}",
-        event.severity(),
-        event.event_name()
-    )
+    let who = sanitize_plain_field(event.principal().unwrap_or("-"));
+    let severity = sanitize_plain_field(event.severity());
+    let name = sanitize_plain_field(event.event_name());
+    format!("{when} {marker} {severity:<13} {name:<34} {who}")
 }
 
 fn decode_payload_value(payload: &[u8]) -> Option<serde_json::Value> {
@@ -484,6 +501,9 @@ fn is_spoofed_broker_envelope(
         .is_some_and(|certs| !certs.trim().is_empty())
     {
         return Some("envelope contains client dxl.certs");
+    }
+    if detections::is_hex_thumbprint(&msg.source_client_id) {
+        return Some("source_client_id is a client certificate thumbprint");
     }
     if !engine.brokers.is_empty()
         && topic != detections::TOPIC_BROKER_STATE
@@ -667,7 +687,7 @@ mod tests {
             version: 3,
             message_type: dxl::MESSAGE_TYPE_EVENT,
             message_id: "{00000000-0000-0000-0000-000000000001}".to_string(),
-            source_client_id: "5a752ed6a24f6d2dd77634b0c68dd729b48d4613".to_string(),
+            source_client_id: "{broker-1}".to_string(),
             source_broker_id: "{broker-1}".to_string(),
             broker_ids: vec![],
             client_ids: vec![],
@@ -745,6 +765,17 @@ mod tests {
             )
             .is_none()
         );
+
+        let mut thumbprint_msg = sample_dxl_message(br#"{"clientGuid":"victim-guid"}"#);
+        thumbprint_msg.source_client_id = "5a752ed6a24f6d2dd77634b0c68dd729b48d4613".to_string();
+        assert_eq!(
+            is_spoofed_broker_envelope(
+                "/mcafee/event/dxl/clientregistry/connect",
+                &thumbprint_msg,
+                &engine
+            ),
+            Some("source_client_id is a client certificate thumbprint")
+        );
     }
 
     #[test]
@@ -760,6 +791,14 @@ mod tests {
             decode_payload_value(br#"{"clientGuid":"abc"}"#)
                 .unwrap()
                 .is_object()
+        );
+    }
+
+    #[test]
+    fn sanitize_plain_field_replaces_control_characters() {
+        assert_eq!(
+            sanitize_plain_field("victim\x1b[31m\nspoofed\r"),
+            "victim [31m spoofed "
         );
     }
 }
