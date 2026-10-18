@@ -1,7 +1,11 @@
 use crate::config::DxlConfig;
 use crate::ocsf::{DetectionFinding, OcsfEvent, OcsfFindingInfo, OcsfMetadata};
 use chrono::Utc;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+fn normalize_thumbprint(thumb: &str) -> String {
+    thumb.trim().replace(':', "").to_ascii_lowercase()
+}
 
 pub struct DetectionEngine {
     grace_period_mins: u32,
@@ -25,7 +29,12 @@ impl DetectionEngine {
     pub fn new(config: &DxlConfig) -> Self {
         Self {
             grace_period_mins: config.service_ttl_grace_period_mins,
-            allowed_thumbprints: config.allowed_thumbprints.clone(),
+            allowed_thumbprints: config
+                .allowed_thumbprints
+                .iter()
+                .map(|s| normalize_thumbprint(s))
+                .filter(|s| !s.is_empty())
+                .collect(),
             sensitive_topics: config.sensitive_topics.clone(),
             services: HashMap::new(),
             client_rates: HashMap::new(),
@@ -57,15 +66,17 @@ impl DetectionEngine {
                             .and_then(|v| v.as_str())
                             .map(|g| g.split(':').next().unwrap_or(g))
                     })
-                && !self.allowed_thumbprints.contains(&cert_str.to_string())
             {
-                alerts.push(Self::build_detection(
-                    now,
-                    &metadata,
-                    "Unknown Certificate Thumbprint",
-                    &format!("Client connected with unknown thumbprint: {}", cert_str),
-                    Some(cert_str.to_string()),
-                ));
+                let norm = normalize_thumbprint(cert_str);
+                if !norm.is_empty() && !self.allowed_thumbprints.contains(&norm) {
+                    alerts.push(Self::build_detection(
+                        now,
+                        &metadata,
+                        "Unknown Certificate Thumbprint",
+                        &format!("Client connected with unknown thumbprint: {}", cert_str),
+                        Some(cert_str.to_string()),
+                    ));
+                }
             }
 
             // Check publishers on non-broker topics (broker events under
@@ -74,33 +85,37 @@ impl DetectionEngine {
             if !topic.starts_with("/mcafee/event/dxl/")
                 && !self.brokers.contains_key(source_client_id)
                 && !source_client_id.is_empty()
-                && !self
-                    .allowed_thumbprints
-                    .contains(&source_client_id.to_string())
             {
-                alerts.push(Self::build_detection(
-                    now,
-                    &metadata,
-                    "Unknown Certificate Thumbprint",
-                    &format!("Publisher with unknown thumbprint: {}", source_client_id),
-                    Some(source_client_id.to_string()),
-                ));
+                let norm = normalize_thumbprint(source_client_id);
+                if !norm.is_empty() && !self.allowed_thumbprints.contains(&norm) {
+                    alerts.push(Self::build_detection(
+                        now,
+                        &metadata,
+                        "Unknown Certificate Thumbprint",
+                        &format!("Publisher with unknown thumbprint: {}", source_client_id),
+                        Some(source_client_id.to_string()),
+                    ));
+                }
             }
 
             if topic.ends_with("/register")
                 && let Some(certs) = payload.get("certificates").and_then(|v| v.as_array())
             {
                 for cert in certs {
-                    if let Some(cert_str) = cert.as_str()
-                        && !self.allowed_thumbprints.contains(&cert_str.to_string())
-                    {
-                        alerts.push(Self::build_detection(
-                            now,
-                            &metadata,
-                            "Unknown Certificate Thumbprint",
-                            &format!("Service registered with unknown thumbprint: {}", cert_str),
-                            Some(cert_str.to_string()),
-                        ));
+                    if let Some(cert_str) = cert.as_str() {
+                        let norm = normalize_thumbprint(cert_str);
+                        if !norm.is_empty() && !self.allowed_thumbprints.contains(&norm) {
+                            alerts.push(Self::build_detection(
+                                now,
+                                &metadata,
+                                "Unknown Certificate Thumbprint",
+                                &format!(
+                                    "Service registered with unknown thumbprint: {}",
+                                    cert_str
+                                ),
+                                Some(cert_str.to_string()),
+                            ));
+                        }
                     }
                 }
             }
@@ -254,6 +269,28 @@ impl DetectionEngine {
         let now_ms = now_secs * 1000;
         let metadata = OcsfMetadata::default();
 
+        for q in self.client_rates.values_mut() {
+            while let Some(&t) = q.front() {
+                if now_ms - t > 60_000 {
+                    q.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.client_rates.retain(|_, q| !q.is_empty());
+
+        for q in self.topic_rates.values_mut() {
+            while let Some(&t) = q.front() {
+                if now_ms - t > 60_000 {
+                    q.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.topic_rates.retain(|_, q| !q.is_empty());
+
         for state in self.services.values_mut() {
             if !state.reported {
                 let expiry = state.registration_time_secs
@@ -340,14 +377,20 @@ impl DetectionEngine {
         self.services.get(guid).map(|s| s.service_type.clone())
     }
 
-    pub fn process_sync_response(&mut self, payload: &serde_json::Value) {
+    pub fn process_sync_response(&mut self, payload: &serde_json::Value) -> Vec<OcsfEvent> {
+        let mut alerts = Vec::new();
+        let now = Utc::now().timestamp_millis();
+        let metadata = OcsfMetadata::default();
+
         if let Some(services) = payload.get("services").and_then(|v| v.as_object()) {
+            let mut seen = HashSet::new();
             for (guid, svc_info) in services {
                 if let (Some(svc_type), Some(ttl), Some(reg_time)) = (
                     svc_info.get("serviceType").and_then(|v| v.as_str()),
                     svc_info.get("ttlMins").and_then(|v| v.as_u64()),
                     svc_info.get("registrationTime").and_then(|v| v.as_i64()),
                 ) {
+                    seen.insert(guid.to_string());
                     self.services.insert(
                         guid.to_string(),
                         ServiceState {
@@ -359,15 +402,41 @@ impl DetectionEngine {
                         },
                     );
                 }
+                if !self.allowed_thumbprints.is_empty()
+                    && let Some(certs) = svc_info.get("certificates").and_then(|v| v.as_array())
+                {
+                    for cert in certs {
+                        if let Some(cert_str) = cert.as_str() {
+                            let norm = normalize_thumbprint(cert_str);
+                            if !norm.is_empty() && !self.allowed_thumbprints.contains(&norm) {
+                                alerts.push(Self::build_detection(
+                                    now,
+                                    &metadata,
+                                    "Unknown Certificate Thumbprint",
+                                    &format!(
+                                        "Service registered with unknown thumbprint: {}",
+                                        cert_str
+                                    ),
+                                    Some(cert_str.to_string()),
+                                ));
+                            }
+                        }
+                    }
+                }
             }
+            self.services.retain(|k, _| seen.contains(k));
         }
+        alerts
     }
 
     pub fn process_broker_sync_response(&mut self, payload: &serde_json::Value) {
         if let Some(brokers) = payload.get("brokers").and_then(|v| v.as_object()) {
+            let mut seen = HashSet::new();
             for (guid, broker_info) in brokers {
+                seen.insert(guid.to_string());
                 self.brokers.insert(guid.to_string(), broker_info.clone());
             }
+            self.brokers.retain(|k, _| seen.contains(k));
         }
     }
 }
@@ -384,10 +453,7 @@ fn topic_matches(filter: &str, topic: &str) -> bool {
             return true;
         }
         let Some(t_level) = topic_levels.get(i) else {
-            // In MQTT 3.1.1 §4.7.1.2, "/a/b/#" also matches "/a/b"
-            return i + 1 == filter_levels.len() - 1
-                && filter_levels[i + 1] == "#"
-                && *f_level == topic_levels[i - 1];
+            return false;
         };
         if *f_level != "+" && *f_level != *t_level {
             return false;
@@ -521,6 +587,10 @@ mod tests {
 
     #[test]
     fn test_mqtt_topic_wildcards() {
+        assert!(!topic_matches("/a/b/b/#", "/a/b"));
+        assert!(topic_matches("/a/b/#", "/a/b"));
+        assert!(topic_matches("/a/b/#", "/a/b/c"));
+        assert!(topic_matches("/a/+/c", "/a/b/c"));
         assert!(topic_matches(
             "/mcafee/service/tie/#",
             "/mcafee/service/tie"
@@ -653,5 +723,83 @@ mod tests {
         } else {
             panic!("Expected DetectionFinding");
         }
+    }
+
+    #[test]
+    fn test_sync_response_prunes_stale_entries_and_checks_certificates() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let now_secs = Utc::now().timestamp();
+
+        let first_sync = json!({
+            "services": {
+                "svc-1": {
+                    "serviceType": "/svc/one",
+                    "ttlMins": 10,
+                    "registrationTime": now_secs,
+                    "certificates": ["ALLOWED_HASH"]
+                },
+                "svc-stale": {
+                    "serviceType": "/svc/stale",
+                    "ttlMins": 10,
+                    "registrationTime": now_secs,
+                    "certificates": ["allowed_hash"]
+                }
+            }
+        });
+        let alerts = engine.process_sync_response(&first_sync);
+        assert!(alerts.is_empty());
+        assert_eq!(engine.services.len(), 2);
+
+        let second_sync = json!({
+            "services": {
+                "svc-1": {
+                    "serviceType": "/svc/one",
+                    "ttlMins": 10,
+                    "registrationTime": now_secs,
+                    "certificates": ["untrusted_sync_cert"]
+                }
+            }
+        });
+        let alerts = engine.process_sync_response(&second_sync);
+        assert_eq!(engine.services.len(), 1);
+        assert!(engine.services.contains_key("svc-1"));
+        assert!(!engine.services.contains_key("svc-stale"));
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Unknown Certificate Thumbprint");
+            assert_eq!(df.suser.as_deref(), Some("untrusted_sync_cert"));
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+
+        engine.process_broker_sync_response(&json!({
+            "brokers": {
+                "{broker-1}": { "guid": "{broker-1}" },
+                "{broker-stale}": { "guid": "{broker-stale}" }
+            }
+        }));
+        assert_eq!(engine.brokers.len(), 2);
+
+        engine.process_broker_sync_response(&json!({
+            "brokers": {
+                "{broker-1}": { "guid": "{broker-1}" }
+            }
+        }));
+        assert_eq!(engine.brokers.len(), 1);
+        assert!(engine.brokers.contains_key("{broker-1}"));
+    }
+
+    #[test]
+    fn test_poll_timeouts_at_prunes_stale_rate_windows() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let payload = json!({});
+        engine.process_event("/some/normal/topic", &payload, "allowed_hash");
+        assert_eq!(engine.client_rates.len(), 1);
+        assert_eq!(engine.topic_rates.len(), 1);
+
+        let future_secs = Utc::now().timestamp() + 65;
+        let _ = engine.poll_timeouts_at(future_secs);
+        assert!(engine.client_rates.is_empty());
+        assert!(engine.topic_rates.is_empty());
     }
 }

@@ -87,31 +87,31 @@ The sensor generates its own alerts (Detection Findings) when it identifies susp
 
 **1. Legacy Cipher Suite (Weak Encryption)**
 Triggered when a client connects using an old, non-PFS cipher suite (e.g., `TLS_RSA_WITH_AES_128_CBC_SHA256`).
-> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Legacy Cipher Suite|4|msg=Client connected with weak legacy cipher: TLS_RSA_WITH_AES_128_CBC_SHA256 suser=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Legacy Cipher Suite|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=Client connected with weak legacy cipher: TLS_RSA_WITH_AES_128_CBC_SHA256 suser=5a752ed6a24f6d2dd77634b0c68dd729b48d4613`
 
 **2. Unknown Certificate Thumbprint (Unknown Identity)**
 Triggered when a service or client registers/connects with a thumbprint that is not listed in `AllowedThumbprints`.
-> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Unknown Certificate Thumbprint|4|msg=Client connected with unknown thumbprint: 9999999999999999999999999999999999999999 suser=9999999999999999999999999999999999999999 deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Unknown Certificate Thumbprint|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=Client connected with unknown thumbprint: 9999999999999999999999999999999999999999 suser=9999999999999999999999999999999999999999`
 
 **3. Sensitive Topic Published (Unauthorized Access)**
 Triggered when a client publishes messages on a topic configured as sensitive.
-> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Sensitive Topic Published|4|msg=Client 5a752ed6a24f6d2dd77634b0c68dd729b48d4613 published to sensitive topic /mcafee/service/tie/file/reputation/set suser=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Sensitive Topic Published|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=Client 5a752ed6a24f6d2dd77634b0c68dd729b48d4613 published to sensitive topic /mcafee/service/tie/file/reputation/set suser=5a752ed6a24f6d2dd77634b0c68dd729b48d4613`
 
 **4. Service TTL Expired (Service Outage)**
 Triggered when the TTL (Time To Live) of a registered service expires and it neither re-registers nor cleanly unregisters within the `ServiceTtlGracePeriodMins`.
-> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Service TTL Expired|4|msg=Service {guid} (/mcafee/service/tie/file/reputation) TTL expired without unregister deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Service TTL Expired|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=Service {guid} (/mcafee/service/tie/file/reputation) TTL expired without unregister`
 
 **5. Fabric Change Detected**
 Triggered by topology changes in the broker network (e.g., bridges up/down).
-> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Fabric Change Detected|4|msg=A fabric topology change or broker state change was detected. deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Fabric Change Detected|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=A fabric topology change or broker state change was detected.`
 
 **6. Client Rate Anomaly**
 Triggered when a specific client publishes more than 100 messages per minute.
-> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Client Rate Anomaly|4|msg=High rate detected for client 5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Client Rate Anomaly|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=High rate detected for 5a752ed6a24f6d2dd77634b0c68dd729b48d4613`
 
 **7. Topic Rate Anomaly**
 Triggered when a specific topic receives more than 100 messages per minute.
-> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Topic Rate Anomaly|4|msg=High rate detected for topic /some/normal/topic deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid`
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Topic Rate Anomaly|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=High rate detected for /some/normal/topic`
 
 In addition to detections, regular audit events are logged, e.g., Network Connect:
 > `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|4001|Connect|1|app=mqtt deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString1Label=client_guid deviceCustomString2=TLSv1.3 deviceCustomString2Label=tls_version deviceCustomString3=TLS_AES_256_GCM_SHA384 deviceCustomString3Label=cipher deviceCustomString4=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString4Label=cert_thumbprint src=172.17.0.1`

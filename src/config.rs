@@ -184,7 +184,14 @@ impl DxlConfig {
             .unwrap_or(false); // Off by default: broker certificates on real fabrics carry no matching SAN
         let tls_ciphers = general
             .and_then(|g| get_ci(g, "TlsCiphers"))
-            .map(|s| s.to_string());
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(ref ciphers) = tls_ciphers {
+            log::debug!(
+                "TlsCiphers='{}' configured in dxlclient.config (rustls uses its built-in PFS cipher suites)",
+                ciphers
+            );
+        }
 
         let brokers_sec = section_ci(&conf, "Brokers").ok_or("Missing [Brokers] section")?;
         let mut brokers = Vec::new();
@@ -215,7 +222,7 @@ impl DxlConfig {
             .and_then(|d| get_ci(d, "AllowedThumbprints"))
             .map(|v| {
                 v.split(',')
-                    .map(|s| s.trim().to_string())
+                    .map(|s| s.trim().replace(':', "").to_ascii_lowercase())
                     .filter(|s| !s.is_empty())
                     .collect()
             })
@@ -415,5 +422,37 @@ mod tests {
         assert_eq!(config.tls_min_version, "1.2");
         assert_eq!(config.brokers.len(), 1);
         assert_eq!(config.brokers[0].ip, "192.168.1.85");
+    }
+
+    #[test]
+    fn test_load_config_normalizes_uppercase_and_colon_separated_thumbprints() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "[Certs]").unwrap();
+        writeln!(file, "BrokerCertChain=ca-bundle.crt").unwrap();
+        writeln!(file, "CertFile=client.crt").unwrap();
+        writeln!(file, "PrivateKey=client.key").unwrap();
+        writeln!(file, "[General]").unwrap();
+        writeln!(file, "TlsCiphers=ECDHE-RSA-AES256-GCM-SHA384").unwrap();
+        writeln!(file, "[Brokers]").unwrap();
+        writeln!(file, "mybroker=id1;8883;broker.local;127.0.0.1").unwrap();
+        writeln!(file, "[Detections]").unwrap();
+        writeln!(
+            file,
+            "AllowedThumbprints=5A:75:2E:D6:A2:4F:6D:2D:D7:76:34:B0:C6:8D:D7:29:B4:8D:46:13, A1B2C3D4"
+        )
+        .unwrap();
+
+        let config = DxlConfig::load(file.path()).unwrap();
+        assert_eq!(
+            config.tls_ciphers.as_deref(),
+            Some("ECDHE-RSA-AES256-GCM-SHA384")
+        );
+        assert_eq!(
+            config.allowed_thumbprints,
+            vec![
+                "5a752ed6a24f6d2dd77634b0c68dd729b48d4613".to_string(),
+                "a1b2c3d4".to_string()
+            ]
+        );
     }
 }

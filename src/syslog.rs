@@ -1,5 +1,6 @@
 use crate::config::DxlConfig;
 use log::{error, info};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
@@ -63,25 +64,47 @@ pub async fn start_syslog_sender(config: &DxlConfig) -> Option<mpsc::Sender<Stri
                 let mut retry = true;
                 while retry {
                     if stream_opt.is_none() {
-                        match TcpStream::connect(&addr).await {
-                            Ok(stream) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(5),
+                            TcpStream::connect(&addr),
+                        )
+                        .await
+                        {
+                            Ok(Ok(stream)) => {
                                 stream_opt = Some(stream);
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 error!("Failed to connect to syslog server {}: {}", addr, e);
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                tokio::time::sleep(Duration::from_secs(5)).await;
                                 break; // Break retry loop and drop message (or keep it in a buffer)
+                            }
+                            Err(_) => {
+                                error!("Timed out connecting to syslog server {}", addr);
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                break;
                             }
                         }
                     }
 
                     if let Some(stream) = &mut stream_opt {
-                        if let Err(e) = stream.write_all(formatted.as_bytes()).await {
-                            error!("Failed to send syslog over TCP: {}", e);
-                            stream_opt = None;
-                            // Retry connecting in next iteration
-                        } else {
-                            retry = false;
+                        match tokio::time::timeout(
+                            Duration::from_secs(5),
+                            stream.write_all(formatted.as_bytes()),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {
+                                retry = false;
+                            }
+                            Ok(Err(e)) => {
+                                error!("Failed to send syslog over TCP: {}", e);
+                                stream_opt = None;
+                                // Retry connecting in next iteration
+                            }
+                            Err(_) => {
+                                error!("Timed out sending syslog over TCP to {}", addr);
+                                stream_opt = None;
+                            }
                         }
                     }
                 }

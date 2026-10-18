@@ -2,6 +2,7 @@ use crate::config::DxlConfig;
 use crate::ocsf::OcsfEvent;
 use log::{error, info};
 use reqwest::Client;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 pub async fn start_http_sender(config: &DxlConfig) -> Option<mpsc::Sender<OcsfEvent>> {
@@ -9,7 +10,11 @@ pub async fn start_http_sender(config: &DxlConfig) -> Option<mpsc::Sender<OcsfEv
     let (tx, mut rx) = mpsc::channel::<OcsfEvent>(1000);
 
     info!("Starting HTTP Webhook sender to {}", url);
-    let client = Client::new();
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| Client::new());
 
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {

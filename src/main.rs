@@ -16,7 +16,7 @@ use cli::{Cli, Format, Kind, ParseOutcome};
 use config::DxlConfig;
 use detections::DetectionEngine;
 use dxl::{DxlMessage, MESSAGE_TYPE_REQUEST, encode_dxl_message, parse_dxl_message};
-use log::{error, info};
+use log::{error, info, warn};
 use mqtt::build_mqtt_options;
 use ocsf::{
     ApiActivity, NetworkActivity, OcsfActor, OcsfApi, OcsfEvent, OcsfMetadata, OcsfService,
@@ -150,8 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &syslog_tx,
                                     &http_tx,
                                     &kafka_tx,
-                                )
-                                .await;
+                                );
                             }
 
                             // Feed into Detection Engine (use Value::Null when payload is empty or non-JSON)
@@ -163,11 +162,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 && msg.request_message_id.as_ref() == Some(&svc_query_msg_id)
                             {
                                 if let Some(value) = &payload_json {
-                                    detection_engine.process_sync_response(value);
+                                    let alerts = detection_engine.process_sync_response(value);
                                     info!(
                                         "Processed svcregistry/query sync response. Loaded {} services.",
                                         detection_engine.services.len()
                                     );
+                                    for alert in alerts {
+                                        dispatch_record(
+                                            &cli,
+                                            alert,
+                                            Kind::Detection,
+                                            &syslog_tx,
+                                            &http_tx,
+                                            &kafka_tx,
+                                        );
+                                    }
                                 }
                             } else if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE
                                 && msg.request_message_id.as_ref() == Some(&broker_query_msg_id)
@@ -208,8 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &syslog_tx,
                                         &http_tx,
                                         &kafka_tx,
-                                    )
-                                    .await;
+                                    );
                                 }
                             }
                         }
@@ -249,8 +257,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &syslog_tx,
                     &http_tx,
                     &kafka_tx,
-                )
-                .await;
+                );
             }
             last_poll = now;
         }
@@ -364,7 +371,7 @@ async fn subscribe_and_sync(
     Ok((svc_query_msg_id, broker_query_msg_id))
 }
 
-async fn dispatch_record(
+fn dispatch_record(
     cli: &Cli,
     record: OcsfEvent,
     kind: Kind,
@@ -374,14 +381,20 @@ async fn dispatch_record(
 ) {
     let cef_str = format_cef(&record);
     emit(cli, &record, &cef_str, kind);
-    if let Some(tx) = syslog_tx {
-        let _ = tx.send(cef_str).await;
+    if let Some(tx) = syslog_tx
+        && let Err(e) = tx.try_send(cef_str)
+    {
+        warn!("Dropping syslog record: {}", e);
     }
-    if let Some(tx) = http_tx {
-        let _ = tx.send(record.clone()).await;
+    if let Some(tx) = http_tx
+        && let Err(e) = tx.try_send(record.clone())
+    {
+        warn!("Dropping HTTP webhook record: {}", e);
     }
-    if let Some(tx) = kafka_tx {
-        let _ = tx.send(record).await;
+    if let Some(tx) = kafka_tx
+        && let Err(e) = tx.try_send(record)
+    {
+        warn!("Dropping Kafka record: {}", e);
     }
 }
 
@@ -444,142 +457,149 @@ fn handle_dxl_message(
         let now = Utc::now().timestamp_millis();
         let metadata = OcsfMetadata::default();
 
-        if topic.contains("clientregistry/connect") || topic.contains("clientregistry/disconnect") {
-            let is_connect = topic.ends_with("/connect");
-            let raw_client_guid = value
-                .get("clientGuid")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let parts: Vec<&str> = raw_client_guid.split(':').collect();
-            let client_guid = parts[0].to_string();
-            let client_instance_guid = if parts.len() > 1 {
-                Some(parts[1].to_string())
-            } else {
-                None
-            };
-
-            let mut src_endpoint = None;
-            if let Some(ip) = value.get("remoteAddress").and_then(|v| v.as_str()) {
-                let clean_ip = ip.strip_prefix("::ffff:").unwrap_or(ip);
-                src_endpoint = Some(crate::ocsf::OcsfEndpoint {
-                    uid: None,
-                    ip: Some(clean_ip.to_string()),
-                });
-            }
-
-            let tls_ver = value.get("tlsVersion").and_then(|v| v.as_str());
-            let tls_cipher = value.get("cipher").and_then(|v| v.as_str());
-            let cert_thumb = value.get("certThumbprint").and_then(|v| v.as_str());
-            let tls = if tls_ver.is_some() || tls_cipher.is_some() || cert_thumb.is_some() {
-                Some(crate::ocsf::OcsfTls {
-                    version: tls_ver.unwrap_or_default().to_string(),
-                    cipher_suites: tls_cipher.map(|c| vec![c.to_string()]).unwrap_or_default(),
-                    certificate: cert_thumb.map(|f| crate::ocsf::OcsfCertificate {
-                        fingerprint: f.to_string(),
-                    }),
-                })
-            } else {
-                None
-            };
-
-            let mut connection_info = None;
-            if let Some(proto) = value.get("protocol").and_then(|v| v.as_str()) {
-                connection_info = Some(crate::ocsf::OcsfConnectionInfo {
-                    protocol_name: proto.to_string(),
-                });
-            }
-
-            let na = NetworkActivity {
-                activity_id: if is_connect { 1 } else { 2 },
-                activity_name: if is_connect {
-                    "Connect".to_string()
-                } else {
-                    "Disconnect".to_string()
-                },
-                category_uid: 4,
-                category_name: "Network Activity".to_string(),
-                class_uid: 4001,
-                class_name: "Network Activity".to_string(),
-                severity_id: 1,
-                severity: "Informational".to_string(),
-                time: now,
-                type_uid: if is_connect { 400101 } else { 400102 },
-                type_name: if is_connect {
-                    "Network Connect".to_string()
-                } else {
-                    "Network Disconnect".to_string()
-                },
-                metadata,
-                src_endpoint,
-                tls,
-                connection_info,
-                client_guid,
-                client_instance_guid,
-            };
-            return Some(OcsfEvent::NetworkActivity(na));
-        } else if topic.contains("svcregistry/register") || topic.contains("svcregistry/unregister")
-        {
-            let is_register = topic.ends_with("/register");
-            let service_guid = value
-                .get("serviceGuid")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let service_type = if is_register {
-                value
-                    .get("serviceType")
+        match topic {
+            "/mcafee/event/dxl/clientregistry/connect"
+            | "/mcafee/event/dxl/clientregistry/disconnect" => {
+                let is_connect = topic == "/mcafee/event/dxl/clientregistry/connect";
+                let raw_client_guid = value
+                    .get("clientGuid")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            } else {
-                engine
-                    .get_service_name(service_guid)
-                    .unwrap_or_else(|| "unknown".to_string())
-            };
-            let client_guid = value.get("clientGuid").and_then(|v| v.as_str());
-
-            let actor = client_guid.map(|guid| OcsfActor {
-                user: OcsfUser {
-                    uid: guid.to_string(),
-                },
-            });
-
-            let aa = ApiActivity {
-                activity_id: if is_register { 1 } else { 4 },
-                activity_name: if is_register {
-                    "Register Service".to_string()
+                    .unwrap_or("unknown");
+                let parts: Vec<&str> = raw_client_guid.split(':').collect();
+                let client_guid = parts[0].to_string();
+                let client_instance_guid = if parts.len() > 1 {
+                    Some(parts[1].to_string())
                 } else {
-                    "Unregister Service".to_string()
-                },
-                category_uid: 6,
-                category_name: "Application Activity".to_string(),
-                class_uid: 6003,
-                class_name: "API Activity".to_string(),
-                severity_id: 1,
-                severity: "Informational".to_string(),
-                time: now,
-                type_uid: if is_register { 600301 } else { 600304 },
-                type_name: if is_register {
-                    "Create API Activity".to_string()
+                    None
+                };
+
+                let mut src_endpoint = None;
+                if let Some(ip) = value.get("remoteAddress").and_then(|v| v.as_str()) {
+                    let clean_ip = ip.strip_prefix("::ffff:").unwrap_or(ip);
+                    src_endpoint = Some(crate::ocsf::OcsfEndpoint {
+                        uid: None,
+                        ip: Some(clean_ip.to_string()),
+                    });
+                }
+
+                let tls_ver = value.get("tlsVersion").and_then(|v| v.as_str());
+                let tls_cipher = value.get("cipher").and_then(|v| v.as_str());
+                let cert_thumb = value.get("certThumbprint").and_then(|v| v.as_str());
+                let tls = if tls_ver.is_some() || tls_cipher.is_some() || cert_thumb.is_some() {
+                    Some(crate::ocsf::OcsfTls {
+                        version: tls_ver.unwrap_or_default().to_string(),
+                        cipher_suites: tls_cipher.map(|c| vec![c.to_string()]).unwrap_or_default(),
+                        certificate: cert_thumb.map(|f| crate::ocsf::OcsfCertificate {
+                            fingerprint: f.to_string(),
+                        }),
+                    })
                 } else {
-                    "Delete API Activity".to_string()
-                },
-                metadata,
-                api: OcsfApi {
-                    operation: if is_register {
-                        "register".to_string()
+                    None
+                };
+
+                let mut connection_info = None;
+                if let Some(proto) = value.get("protocol").and_then(|v| v.as_str()) {
+                    connection_info = Some(crate::ocsf::OcsfConnectionInfo {
+                        protocol_name: proto.to_string(),
+                    });
+                }
+
+                let na = NetworkActivity {
+                    activity_id: if is_connect { 1 } else { 2 },
+                    activity_name: if is_connect {
+                        "Connect".to_string()
                     } else {
-                        "unregister".to_string()
+                        "Disconnect".to_string()
                     },
-                    service: OcsfService {
-                        name: service_type.to_string(),
-                        uid: service_guid.to_string(),
+                    category_uid: 4,
+                    category_name: "Network Activity".to_string(),
+                    class_uid: 4001,
+                    class_name: "Network Activity".to_string(),
+                    severity_id: 1,
+                    severity: "Informational".to_string(),
+                    time: now,
+                    type_uid: if is_connect { 400101 } else { 400102 },
+                    type_name: if is_connect {
+                        "Network Connect".to_string()
+                    } else {
+                        "Network Disconnect".to_string()
                     },
-                },
-                actor,
-            };
-            return Some(OcsfEvent::ApiActivity(aa));
-        } else if !topic.starts_with("/mcafee/client/") {
-            info!("Ignored event on topic {}", topic);
+                    metadata,
+                    src_endpoint,
+                    tls,
+                    connection_info,
+                    client_guid,
+                    client_instance_guid,
+                };
+                return Some(OcsfEvent::NetworkActivity(na));
+            }
+            "/mcafee/event/dxl/svcregistry/register"
+            | "/mcafee/event/dxl/svcregistry/unregister" => {
+                let is_register = topic == "/mcafee/event/dxl/svcregistry/register";
+                let service_guid = value
+                    .get("serviceGuid")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let service_type = if is_register {
+                    value
+                        .get("serviceType")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                } else {
+                    engine
+                        .get_service_name(service_guid)
+                        .unwrap_or_else(|| "unknown".to_string())
+                };
+                let client_guid = value.get("clientGuid").and_then(|v| v.as_str());
+
+                let actor = client_guid.map(|guid| OcsfActor {
+                    user: OcsfUser {
+                        uid: guid.to_string(),
+                    },
+                });
+
+                let aa = ApiActivity {
+                    activity_id: if is_register { 1 } else { 4 },
+                    activity_name: if is_register {
+                        "Register Service".to_string()
+                    } else {
+                        "Unregister Service".to_string()
+                    },
+                    category_uid: 6,
+                    category_name: "Application Activity".to_string(),
+                    class_uid: 6003,
+                    class_name: "API Activity".to_string(),
+                    severity_id: 1,
+                    severity: "Informational".to_string(),
+                    time: now,
+                    type_uid: if is_register { 600301 } else { 600304 },
+                    type_name: if is_register {
+                        "Create API Activity".to_string()
+                    } else {
+                        "Delete API Activity".to_string()
+                    },
+                    metadata,
+                    api: OcsfApi {
+                        operation: if is_register {
+                            "register".to_string()
+                        } else {
+                            "unregister".to_string()
+                        },
+                        service: OcsfService {
+                            name: service_type.to_string(),
+                            uid: service_guid.to_string(),
+                        },
+                    },
+                    actor,
+                };
+                return Some(OcsfEvent::ApiActivity(aa));
+            }
+            "/mcafee/event/dxl/fabricchange" | "/mcafee/event/dxl/brokerregistry/brokerstate" => {}
+            _ if topic.starts_with("/mcafee/event/dxl/") => {
+                log::debug!("Ignored broker event on topic {}", topic);
+            }
+            _ => {}
         }
     }
     None
