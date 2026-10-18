@@ -33,7 +33,7 @@ pub async fn start_syslog_sender(config: &DxlConfig) -> Option<mpsc::Sender<Stri
                 let formatted = format!(
                     "<134>1 {} {} {} - - - {}\n",
                     chrono::Utc::now().to_rfc3339(),
-                    "rust-sensor",
+                    "opendxl-siem-sensor",
                     "OpenDXL",
                     msg
                 );
@@ -48,7 +48,7 @@ pub async fn start_syslog_sender(config: &DxlConfig) -> Option<mpsc::Sender<Stri
                 let formatted = format!(
                     "<134>1 {} {} {} - - - {}\n",
                     chrono::Utc::now().to_rfc3339(),
-                    "rust-sensor",
+                    "opendxl-siem-sensor",
                     "OpenDXL",
                     msg
                 );

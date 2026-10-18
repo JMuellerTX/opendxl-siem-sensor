@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.cert_file,
         &config.private_key,
         config.verify_hostname,
+        &config.tls_min_version,
     )
     .unwrap_or_else(|e| {
         eprintln!("Error: {e}");
@@ -113,6 +114,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client
         .subscribe("/mcafee/event/dxl/#", QoS::AtMostOnce)
         .await?;
+    for topic in &config.sensitive_topics {
+        if !topic.is_empty() && !topic.starts_with("/mcafee/event/dxl/") {
+            client.subscribe(topic, QoS::AtMostOnce).await?;
+            info!("Subscribed to sensitive topic: {}", topic);
+        }
+    }
 
     let svc_query_msg_id = Uuid::new_v4().to_string();
     let svc_query_msg = DxlMessage {
@@ -196,45 +203,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
-                            // Feed into Detection Engine if payload is JSON
-                            if let Ok(json_str) = std::str::from_utf8(&msg.payload)
-                                && let Ok(value) =
-                                    serde_json::from_str::<serde_json::Value>(json_str)
+                            // Feed into Detection Engine (use Value::Null when payload is empty or non-JSON)
+                            let payload_json = std::str::from_utf8(&msg.payload)
+                                .ok()
+                                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+
+                            if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE
+                                && msg.request_message_id.as_ref() == Some(&svc_query_msg_id)
                             {
-                                if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE
-                                    && msg.request_message_id.as_ref() == Some(&svc_query_msg_id)
-                                {
-                                    detection_engine.process_sync_response(&value);
+                                if let Some(value) = &payload_json {
+                                    detection_engine.process_sync_response(value);
                                     info!(
                                         "Processed svcregistry/query sync response. Loaded {} services.",
                                         detection_engine.services.len()
                                     );
-                                } else if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE
-                                    && msg.request_message_id.as_ref() == Some(&broker_query_msg_id)
-                                {
-                                    detection_engine.process_broker_sync_response(&value);
+                                }
+                            } else if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE
+                                && msg.request_message_id.as_ref() == Some(&broker_query_msg_id)
+                            {
+                                if let Some(value) = &payload_json {
+                                    detection_engine.process_broker_sync_response(value);
                                     info!(
                                         "Processed brokerregistry/query sync response. Loaded {} brokers.",
                                         detection_engine.brokers.len()
                                     );
-                                } else {
-                                    let alerts = detection_engine.process_event(
-                                        &publish.topic,
-                                        &value,
-                                        &msg.source_client_id,
-                                    );
-                                    for alert in alerts {
-                                        let cef_str = format_cef(&alert);
-                                        emit(&cli, &alert, &cef_str, Kind::Detection);
-                                        if let Some(tx) = &syslog_tx {
-                                            let _ = tx.send(cef_str).await;
-                                        }
-                                        if let Some(tx) = &http_tx {
-                                            let _ = tx.send(alert.clone()).await;
-                                        }
-                                        if let Some(tx) = &kafka_tx {
-                                            let _ = tx.send(alert).await;
-                                        }
+                                }
+                            } else {
+                                let value = payload_json.unwrap_or(serde_json::Value::Null);
+                                let alerts = detection_engine.process_event(
+                                    &publish.topic,
+                                    &value,
+                                    &msg.source_client_id,
+                                );
+                                for alert in alerts {
+                                    let cef_str = format_cef(&alert);
+                                    emit(&cli, &alert, &cef_str, Kind::Detection);
+                                    if let Some(tx) = &syslog_tx {
+                                        let _ = tx.send(cef_str).await;
+                                    }
+                                    if let Some(tx) = &http_tx {
+                                        let _ = tx.send(alert.clone()).await;
+                                    }
+                                    if let Some(tx) = &kafka_tx {
+                                        let _ = tx.send(alert).await;
                                     }
                                 }
                             }
@@ -446,7 +457,7 @@ fn handle_dxl_message(
             });
 
             let aa = ApiActivity {
-                activity_id: if is_register { 2 } else { 4 },
+                activity_id: if is_register { 1 } else { 4 },
                 activity_name: if is_register {
                     "Register Service".to_string()
                 } else {
@@ -485,4 +496,66 @@ fn handle_dxl_message(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn sample_dxl_message(payload: &[u8]) -> DxlMessage {
+        DxlMessage {
+            version: 3,
+            message_type: dxl::MESSAGE_TYPE_EVENT,
+            message_id: "{00000000-0000-0000-0000-000000000001}".to_string(),
+            source_client_id: "5a752ed6a24f6d2dd77634b0c68dd729b48d4613".to_string(),
+            source_broker_id: "{broker-1}".to_string(),
+            broker_ids: vec![],
+            client_ids: vec![],
+            payload: payload.to_vec(),
+            reply_to_topic: None,
+            service_id: None,
+            request_message_id: None,
+            error_code: None,
+            error_message: None,
+            other_fields: HashMap::new(),
+            source_tenant_guid: None,
+            destination_tenant_guids: vec![],
+            source_client_instance_id: None,
+        }
+    }
+
+    #[test]
+    fn register_and_unregister_events_use_matching_ocsf_activity_id_and_type_uid() {
+        let engine = DetectionEngine::new(&DxlConfig::default());
+        let reg_msg = sample_dxl_message(
+            br#"{"serviceGuid":"{svc-1}","serviceType":"/mcafee/service/tie","clientGuid":"5a752ed6a24f6d2dd77634b0c68dd729b48d4613"}"#,
+        );
+        let event = handle_dxl_message("/mcafee/event/dxl/svcregistry/register", &reg_msg, &engine)
+            .expect("register event must normalize");
+        match event {
+            OcsfEvent::ApiActivity(aa) => {
+                assert_eq!(aa.activity_id, 1);
+                assert_eq!(aa.type_uid, 600301);
+                assert_eq!(aa.api.operation, "register");
+            }
+            other => panic!("expected ApiActivity, got {other:?}"),
+        }
+
+        let unreg_msg = sample_dxl_message(br#"{"serviceGuid":"{svc-1}"}"#);
+        let event = handle_dxl_message(
+            "/mcafee/event/dxl/svcregistry/unregister",
+            &unreg_msg,
+            &engine,
+        )
+        .expect("unregister event must normalize");
+        match event {
+            OcsfEvent::ApiActivity(aa) => {
+                assert_eq!(aa.activity_id, 4);
+                assert_eq!(aa.type_uid, 600304);
+                assert_eq!(aa.api.operation, "unregister");
+            }
+            other => panic!("expected ApiActivity, got {other:?}"),
+        }
+    }
 }

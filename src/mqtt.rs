@@ -18,6 +18,7 @@ pub enum TlsSetupError {
     PrivateKey { path: String, reason: String },
     ClientAuth { reason: String },
     Verifier { reason: String },
+    ProtocolVersion { version: String },
 }
 
 impl fmt::Display for TlsSetupError {
@@ -35,11 +36,33 @@ impl fmt::Display for TlsSetupError {
             TlsSetupError::Verifier { reason } => {
                 write!(f, "cannot build the certificate verifier: {reason}")
             }
+            TlsSetupError::ProtocolVersion { version } => {
+                write!(
+                    f,
+                    "unsupported TlsMinVersion '{version}' (expected '1.2' or '1.3')"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for TlsSetupError {}
+
+static TLS12_AND_13: &[&rustls::SupportedProtocolVersion] =
+    &[&rustls::version::TLS13, &rustls::version::TLS12];
+static TLS13_ONLY: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];
+
+pub fn protocol_versions(
+    tls_min_version: &str,
+) -> Result<&'static [&'static rustls::SupportedProtocolVersion], TlsSetupError> {
+    match tls_min_version.trim() {
+        "1.2" | "TLSv1.2" | "tlsv1.2" => Ok(TLS12_AND_13),
+        "1.3" | "TLSv1.3" | "tlsv1.3" => Ok(TLS13_ONLY),
+        other => Err(TlsSetupError::ProtocolVersion {
+            version: other.to_string(),
+        }),
+    }
+}
 
 // PEM parsing comes from rustls-pki-types, which rustls brings anyway.
 // rustls-pemfile, the crate that used to do this, is unmaintained
@@ -71,6 +94,7 @@ pub fn load_keys(path: &str) -> Result<PrivateKeyDer<'static>, TlsSetupError> {
 }
 
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_mqtt_options(
     client_id: &str,
     host: &str,
@@ -79,14 +103,16 @@ pub fn build_mqtt_options(
     client_cert_path: &str,
     client_key_path: &str,
     verify_hostname: bool,
+    tls_min_version: &str,
 ) -> Result<MqttOptions, TlsSetupError> {
+    let versions = protocol_versions(tls_min_version)?;
     let mut root_store = RootCertStore::empty();
     root_store.add_parsable_certificates(load_certs(ca_cert_path)?);
 
     let client_certs = load_certs(client_cert_path)?;
     let client_key = load_keys(client_key_path)?;
 
-    let mut client_config = rustls::ClientConfig::builder()
+    let mut client_config = rustls::ClientConfig::builder_with_protocol_versions(versions)
         .with_root_certificates(root_store.clone())
         .with_client_auth_cert(client_certs, client_key)
         .map_err(|e| TlsSetupError::ClientAuth {
@@ -103,6 +129,7 @@ pub fn build_mqtt_options(
             .set_certificate_verifier(Arc::new(verifier));
     }
 
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
     let mut mqttoptions = MqttOptions::new(client_id, host, port);
     mqttoptions.set_transport(Transport::tls_with_config(client_config.into()));
     Ok(mqttoptions)
@@ -164,9 +191,26 @@ mod tests {
             "no-such-client.crt",
             "no-such-client.key",
             false,
+            "1.2",
         )
         .expect_err("nothing here exists, so this must fail");
         assert!(error.to_string().contains("no-such-ca.crt"), "{error}");
+    }
+
+    #[test]
+    fn protocol_versions_accepts_1_2_and_1_3_and_rejects_unknown() {
+        let v12 = protocol_versions("1.2").expect("1.2 is valid");
+        assert_eq!(v12.len(), 2);
+        let v13 = protocol_versions("1.3").expect("1.3 is valid");
+        assert_eq!(v13.len(), 1);
+        assert_eq!(v13[0].version, rustls::version::TLS13.version);
+        let v13_named = protocol_versions("TLSv1.3").expect("TLSv1.3 is valid");
+        assert_eq!(v13_named.len(), 1);
+        let err = protocol_versions("1.1").expect_err("1.1 must be rejected");
+        assert!(
+            err.to_string().contains("unsupported TlsMinVersion"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -190,13 +234,14 @@ mod tests {
         }
 
         let mut mqttoptions = build_mqtt_options(
-            "rust-sensor",
+            "opendxl-siem-sensor",
             "127.0.0.1",
             18883,
             &ca_path,
             &format!("{}/client.crt", config_dir),
             &format!("{}/client.key", config_dir),
             false,
+            "1.2",
         )
         .expect("the test configuration should produce a usable TLS setup");
         mqttoptions.set_keep_alive(Duration::from_secs(5));
@@ -213,7 +258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tls_versions_g9() {
+    async fn test_tls_versions() {
         use crate::tls::NoHostnameVerifier;
         use rustls::ClientConfig;
         use rustls::pki_types::ServerName;
@@ -222,7 +267,8 @@ mod tests {
         use tokio_rustls::TlsConnector;
 
         let config_modern = std::env::var("DXL_SENSOR_TEST_CONFIG_DIR");
-        let config_tls13 = std::env::var("DXL_SENSOR_TEST_CONFIG_DIR_TLS13");
+        let config_tls13 = std::env::var("DXL_SENSOR_TEST_CONFIG_TLS13")
+            .or_else(|_| std::env::var("DXL_SENSOR_TEST_CONFIG_DIR_TLS13"));
 
         let mut configs = Vec::new();
         if let Ok(dir) = config_modern {
@@ -245,9 +291,7 @@ mod tests {
         }
 
         if configs.is_empty() {
-            println!(
-                "Skipping test_tls_versions_g9: Environment variables for test configs not set"
-            );
+            println!("Skipping test_tls_versions: Environment variables for test configs not set");
             return;
         }
 

@@ -18,7 +18,7 @@ impl Default for OcsfMetadata {
     fn default() -> Self {
         Self {
             product: OcsfProduct {
-                name: "OpenDXL Rust Sensor".to_string(),
+                name: "OpenDXL SIEM Sensor".to_string(),
                 vendor_name: "OpenDXL".to_string(),
                 version: "1.0.0".to_string(),
             },
@@ -79,7 +79,7 @@ pub struct OcsfConnectionInfo {
 // 6003 API Activity (Register / Unregister)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ApiActivity {
-    pub activity_id: i32, // 1: Read, 2: Create, 3: Update, 4: Delete
+    pub activity_id: i32, // 1: Create, 2: Read, 3: Update, 4: Delete
     pub activity_name: String,
     pub category_uid: i32, // 6: Application Activity
     pub category_name: String,
@@ -88,7 +88,7 @@ pub struct ApiActivity {
     pub severity_id: i32, // 1: Informational
     pub severity: String,
     pub time: i64,     // Epoch milliseconds
-    pub type_uid: i32, // 600302 for create (register), 600304 for delete (unregister)
+    pub type_uid: i32, // 600301 for create (register), 600304 for delete (unregister)
     pub type_name: String,
     pub metadata: OcsfMetadata,
 

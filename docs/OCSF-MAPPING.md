@@ -4,7 +4,7 @@ This document describes the mapping of OpenDXL events to the Open Cybersecurity 
 
 ## Mapping Summary
 
-All emitted events share common required OCSF attributes such as `time`, `severity_id`, `severity`, and `metadata` (`metadata.product.name = "Rust SIEM Sensor"`, `metadata.product.vendor_name = "OpenDXL"`).
+All emitted events share common required OCSF attributes such as `time`, `severity_id`, `severity`, and `metadata` (`metadata.product.name = "OpenDXL SIEM Sensor"`, `metadata.product.vendor_name = "OpenDXL"`).
 
 | DXL Event | OCSF Class | Class UID | Activity | Activity ID | Type UID |
 |-----------|------------|-----------|----------|-------------|----------|
