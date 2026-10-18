@@ -108,74 +108,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut detection_engine = DetectionEngine::new(&config);
 
     let reply_to_topic = format!("/mcafee/client/{}", config.client_id);
-    client.subscribe(&reply_to_topic, QoS::AtMostOnce).await?;
-    info!("Subscribed to reply topic: {}", reply_to_topic);
-
-    client
-        .subscribe("/mcafee/event/dxl/#", QoS::AtMostOnce)
-        .await?;
-    for topic in &config.sensitive_topics {
-        if !topic.is_empty() && !topic.starts_with("/mcafee/event/dxl/") {
-            client.subscribe(topic, QoS::AtMostOnce).await?;
-            info!("Subscribed to sensitive topic: {}", topic);
-        }
-    }
-
-    let svc_query_msg_id = Uuid::new_v4().to_string();
-    let svc_query_msg = DxlMessage {
-        version: 3,
-        message_type: MESSAGE_TYPE_REQUEST,
-        message_id: svc_query_msg_id.clone(),
-        source_client_id: config.client_id.clone(),
-        source_broker_id: "".to_string(),
-        broker_ids: vec![],
-        client_ids: vec![],
-        payload: b"{}".to_vec(),
-        reply_to_topic: Some(reply_to_topic.clone()),
-        service_id: Some("".to_string()),
-        request_message_id: None,
-        error_code: None,
-        error_message: None,
-        other_fields: std::collections::HashMap::new(),
-        source_tenant_guid: None,
-        destination_tenant_guids: vec![],
-        source_client_instance_id: None,
-    };
-
-    let encoded_svc_query = encode_dxl_message(&svc_query_msg)?;
-    client
-        .publish(
-            "/mcafee/service/dxl/svcregistry/query",
-            QoS::AtMostOnce,
-            false,
-            encoded_svc_query,
-        )
-        .await?;
-    info!("Sent svcregistry/query");
-
-    let broker_query_msg_id = Uuid::new_v4().to_string();
-    let broker_query_msg = DxlMessage {
-        message_id: broker_query_msg_id.clone(),
-        ..svc_query_msg.clone()
-    };
-    let encoded_broker_query = encode_dxl_message(&broker_query_msg)?;
-    client
-        .publish(
-            "/mcafee/service/dxl/brokerregistry/query",
-            QoS::AtMostOnce,
-            false,
-            encoded_broker_query,
-        )
-        .await?;
-    info!("Sent brokerregistry/query");
+    let (mut svc_query_msg_id, mut broker_query_msg_id) =
+        subscribe_and_sync(&client, &config, &reply_to_topic).await?;
 
     let mut last_poll = Utc::now().timestamp();
 
     loop {
         // Use timeout to allow periodic polling for detections
         match tokio::time::timeout(Duration::from_secs(10), eventloop.poll()).await {
-            Ok(Ok(notification)) => {
-                if let rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish)) = notification {
+            Ok(Ok(notification)) => match notification {
+                rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(_)) => {
+                    info!("Connected to broker; subscribing and syncing registry state");
+                    match subscribe_and_sync(&client, &config, &reply_to_topic).await {
+                        Ok((svc_id, broker_id)) => {
+                            svc_query_msg_id = svc_id;
+                            broker_query_msg_id = broker_id;
+                        }
+                        Err(e) => error!("Failed to subscribe and sync after ConnAck: {}", e),
+                    }
+                }
+                rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish)) => {
                     info!("Received event on topic: {}", publish.topic);
 
                     match parse_dxl_message(&publish.payload) {
@@ -189,18 +141,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(ocsf_event) =
                                 handle_dxl_message(&publish.topic, &msg, &detection_engine)
                             {
-                                let cef_str = format_cef(&ocsf_event);
-                                emit(&cli, &ocsf_event, &cef_str, Kind::Event);
-
-                                if let Some(tx) = &syslog_tx {
-                                    let _ = tx.send(cef_str).await;
-                                }
-                                if let Some(tx) = &http_tx {
-                                    let _ = tx.send(ocsf_event.clone()).await;
-                                }
-                                if let Some(tx) = &kafka_tx {
-                                    let _ = tx.send(ocsf_event).await;
-                                }
+                                dispatch_record(
+                                    &cli,
+                                    ocsf_event,
+                                    Kind::Event,
+                                    &syslog_tx,
+                                    &http_tx,
+                                    &kafka_tx,
+                                )
+                                .await;
                             }
 
                             // Feed into Detection Engine (use Value::Null when payload is empty or non-JSON)
@@ -228,6 +177,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         detection_engine.brokers.len()
                                     );
                                 }
+                            } else if publish.topic == reply_to_topic
+                                && msg.message_type == dxl::MESSAGE_TYPE_ERROR
+                            {
+                                error!(
+                                    "Received error response on reply topic (code={:?}): {:?}",
+                                    msg.error_code, msg.error_message
+                                );
                             } else {
                                 let value = payload_json.unwrap_or(serde_json::Value::Null);
                                 let alerts = detection_engine.process_event(
@@ -236,17 +192,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &msg.source_client_id,
                                 );
                                 for alert in alerts {
-                                    let cef_str = format_cef(&alert);
-                                    emit(&cli, &alert, &cef_str, Kind::Detection);
-                                    if let Some(tx) = &syslog_tx {
-                                        let _ = tx.send(cef_str).await;
-                                    }
-                                    if let Some(tx) = &http_tx {
-                                        let _ = tx.send(alert.clone()).await;
-                                    }
-                                    if let Some(tx) = &kafka_tx {
-                                        let _ = tx.send(alert).await;
-                                    }
+                                    dispatch_record(
+                                        &cli,
+                                        alert,
+                                        Kind::Detection,
+                                        &syslog_tx,
+                                        &http_tx,
+                                        &kafka_tx,
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -255,7 +209,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-            }
+                _ => {}
+            },
             Ok(Err(e)) => {
                 let err_str = format!("{:?}", e);
                 if err_str.contains("PeerIncompatible(ServerTlsVersionIsDisabledByOurConfig)") {
@@ -278,20 +233,111 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if now - last_poll > 10 {
             let alerts = detection_engine.poll_timeouts();
             for alert in alerts {
-                let cef_str = format_cef(&alert);
-                emit(&cli, &alert, &cef_str, Kind::Detection);
-                if let Some(tx) = &syslog_tx {
-                    let _ = tx.send(cef_str).await;
-                }
-                if let Some(tx) = &http_tx {
-                    let _ = tx.send(alert.clone()).await;
-                }
-                if let Some(tx) = &kafka_tx {
-                    let _ = tx.send(alert).await;
-                }
+                dispatch_record(
+                    &cli,
+                    alert,
+                    Kind::Detection,
+                    &syslog_tx,
+                    &http_tx,
+                    &kafka_tx,
+                )
+                .await;
             }
             last_poll = now;
         }
+    }
+}
+
+async fn subscribe_and_sync(
+    client: &AsyncClient,
+    config: &DxlConfig,
+    reply_to_topic: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    client.subscribe(reply_to_topic, QoS::AtMostOnce).await?;
+    info!("Subscribed to reply topic: {}", reply_to_topic);
+
+    client
+        .subscribe("/mcafee/event/dxl/#", QoS::AtMostOnce)
+        .await?;
+    for topic in &config.sensitive_topics {
+        if !topic.is_empty() && !topic.starts_with("/mcafee/event/dxl/") {
+            client.subscribe(topic, QoS::AtMostOnce).await?;
+            info!("Subscribed to sensitive topic: {}", topic);
+        }
+    }
+
+    let svc_query_msg_id = Uuid::new_v4().to_string();
+    let svc_query_msg = DxlMessage {
+        version: 3,
+        message_type: MESSAGE_TYPE_REQUEST,
+        message_id: svc_query_msg_id.clone(),
+        source_client_id: config.client_id.clone(),
+        source_broker_id: "".to_string(),
+        broker_ids: vec![],
+        client_ids: vec![],
+        payload: b"{}".to_vec(),
+        reply_to_topic: Some(reply_to_topic.to_string()),
+        service_id: Some("".to_string()),
+        request_message_id: None,
+        error_code: None,
+        error_message: None,
+        other_fields: std::collections::HashMap::new(),
+        source_tenant_guid: None,
+        destination_tenant_guids: vec![],
+        source_client_instance_id: None,
+    };
+
+    let encoded_svc_query = encode_dxl_message(&svc_query_msg)?;
+    client
+        .publish(
+            "/mcafee/service/dxl/svcregistry/query",
+            QoS::AtMostOnce,
+            false,
+            encoded_svc_query,
+        )
+        .await?;
+    info!("Sent svcregistry/query");
+
+    let broker_query_msg_id = Uuid::new_v4().to_string();
+    let broker_query_msg = DxlMessage {
+        message_id: broker_query_msg_id.clone(),
+        ..svc_query_msg
+    };
+    let encoded_broker_query = encode_dxl_message(&broker_query_msg)?;
+    client
+        .publish(
+            "/mcafee/service/dxl/brokerregistry/query",
+            QoS::AtMostOnce,
+            false,
+            encoded_broker_query,
+        )
+        .await?;
+    info!("Sent brokerregistry/query");
+
+    Ok((svc_query_msg_id, broker_query_msg_id))
+}
+
+async fn dispatch_record(
+    cli: &Cli,
+    record: OcsfEvent,
+    kind: Kind,
+    syslog_tx: &Option<tokio::sync::mpsc::Sender<String>>,
+    http_tx: &Option<tokio::sync::mpsc::Sender<OcsfEvent>>,
+    kafka_tx: &Option<tokio::sync::mpsc::Sender<OcsfEvent>>,
+) {
+    if !cli.wants(kind) {
+        return;
+    }
+    let cef_str = format_cef(&record);
+    emit(cli, &record, &cef_str, kind);
+    if let Some(tx) = syslog_tx {
+        let _ = tx.send(cef_str).await;
+    }
+    if let Some(tx) = http_tx {
+        let _ = tx.send(record.clone()).await;
+    }
+    if let Some(tx) = kafka_tx {
+        let _ = tx.send(record).await;
     }
 }
 
@@ -377,23 +423,20 @@ fn handle_dxl_message(
                 });
             }
 
-            let mut tls = None;
-            if let (Some(ver), Some(cipher)) = (
-                value.get("tlsVersion").and_then(|v| v.as_str()),
-                value.get("cipher").and_then(|v| v.as_str()),
-            ) {
-                let cert = value
-                    .get("certThumbprint")
-                    .and_then(|v| v.as_str())
-                    .map(|f| crate::ocsf::OcsfCertificate {
+            let tls_ver = value.get("tlsVersion").and_then(|v| v.as_str());
+            let tls_cipher = value.get("cipher").and_then(|v| v.as_str());
+            let cert_thumb = value.get("certThumbprint").and_then(|v| v.as_str());
+            let tls = if tls_ver.is_some() || tls_cipher.is_some() || cert_thumb.is_some() {
+                Some(crate::ocsf::OcsfTls {
+                    version: tls_ver.unwrap_or_default().to_string(),
+                    cipher_suites: tls_cipher.map(|c| vec![c.to_string()]).unwrap_or_default(),
+                    certificate: cert_thumb.map(|f| crate::ocsf::OcsfCertificate {
                         fingerprint: f.to_string(),
-                    });
-                tls = Some(crate::ocsf::OcsfTls {
-                    version: ver.to_string(),
-                    cipher_suites: vec![cipher.to_string()],
-                    certificate: cert,
-                });
-            }
+                    }),
+                })
+            } else {
+                None
+            };
 
             let mut connection_info = None;
             if let Some(proto) = value.get("protocol").and_then(|v| v.as_str()) {

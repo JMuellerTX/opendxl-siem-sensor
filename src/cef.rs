@@ -54,8 +54,10 @@ pub fn format_cef(event: &OcsfEvent) -> String {
                 ext.insert("app", info.protocol_name.clone());
             }
             if let Some(tls) = &na.tls {
-                ext.insert("deviceCustomString2", tls.version.clone());
-                ext.insert("deviceCustomString2Label", "tls_version".to_string());
+                if !tls.version.is_empty() {
+                    ext.insert("deviceCustomString2", tls.version.clone());
+                    ext.insert("deviceCustomString2Label", "tls_version".to_string());
+                }
                 if let Some(cipher) = tls.cipher_suites.first() {
                     ext.insert("deviceCustomString3", cipher.clone());
                     ext.insert("deviceCustomString3Label", "cipher".to_string());

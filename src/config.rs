@@ -54,6 +54,99 @@ pub struct Broker {
     pub ip: String,
 }
 
+fn section_ci<'a>(conf: &'a Ini, name: &str) -> Option<&'a ini::Properties> {
+    conf.section(Some(name)).or_else(|| {
+        conf.iter()
+            .find(|(sec, _)| sec.is_some_and(|s| s.eq_ignore_ascii_case(name)))
+            .map(|(_, props)| props)
+    })
+}
+
+fn get_ci<'a>(props: &'a ini::Properties, key: &str) -> Option<&'a str> {
+    props.get(key).or_else(|| {
+        props
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v)
+    })
+}
+
+fn parse_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
+fn parse_broker_line(value: &str) -> Option<Broker> {
+    let parts: Vec<&str> = value.split(';').map(|s| s.trim()).collect();
+    match parts.len() {
+        2 => {
+            // port;host
+            let port = parts[0].parse().ok()?;
+            let host = parts[1].to_string();
+            if host.is_empty() {
+                return None;
+            }
+            Some(Broker {
+                id: String::new(),
+                port,
+                ip: host.clone(),
+                host,
+            })
+        }
+        3 => {
+            // Either port;host;ip (no id) or id;port;host (no ip)
+            if let Ok(port) = parts[0].parse::<u16>() {
+                let host = parts[1].to_string();
+                let ip = if parts[2].is_empty() {
+                    host.clone()
+                } else {
+                    parts[2].to_string()
+                };
+                Some(Broker {
+                    id: String::new(),
+                    port,
+                    host,
+                    ip,
+                })
+            } else {
+                let port = parts[1].parse().ok()?;
+                let host = parts[2].to_string();
+                if host.is_empty() {
+                    return None;
+                }
+                Some(Broker {
+                    id: parts[0].to_string(),
+                    port,
+                    ip: host.clone(),
+                    host,
+                })
+            }
+        }
+        n if n >= 4 => {
+            // id;port;host;ip (where ip may be empty, falling back to host)
+            let port = parts[1].parse().unwrap_or(8883);
+            let host = parts[2].to_string();
+            let ip = if parts[3].is_empty() {
+                host.clone()
+            } else {
+                parts[3].to_string()
+            };
+            if host.is_empty() && ip.is_empty() {
+                return None;
+            }
+            Some(Broker {
+                id: parts[0].to_string(),
+                port,
+                host,
+                ip,
+            })
+        }
+        _ => None,
+    }
+}
+
 impl DxlConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let conf = Ini::load_from_file(&path)?;
@@ -68,79 +161,83 @@ impl DxlConfig {
             }
         };
 
-        let certs = conf
-            .section(Some("Certs"))
-            .ok_or("Missing [Certs] section")?;
-        let broker_cert_chain = resolve_path(
-            certs
-                .get("BrokerCertChain")
-                .ok_or("Missing BrokerCertChain")?,
-        );
-        let cert_file = resolve_path(certs.get("CertFile").ok_or("Missing CertFile")?);
-        let private_key = resolve_path(certs.get("PrivateKey").ok_or("Missing PrivateKey")?);
+        let certs = section_ci(&conf, "Certs").ok_or("Missing [Certs] section")?;
+        let broker_cert_chain =
+            resolve_path(get_ci(certs, "BrokerCertChain").ok_or("Missing BrokerCertChain")?);
+        let cert_file = resolve_path(get_ci(certs, "CertFile").ok_or("Missing CertFile")?);
+        let private_key = resolve_path(get_ci(certs, "PrivateKey").ok_or("Missing PrivateKey")?);
 
-        let general = conf
-            .section(Some("General"))
-            .ok_or("Missing [General] section")?;
-        let client_id = general
-            .get("ClientId")
-            .map(|s| s.to_string())
+        let general = section_ci(&conf, "General").ok_or("Missing [General] section")?;
+        let client_id = get_ci(general, "ClientId")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("{{{}}}", uuid::Uuid::new_v4().to_string().to_lowercase()));
-        let tls_min_version = general.get("TlsMinVersion").unwrap_or("1.2").to_string();
-        let verify_hostname = general
-            .get("VerifyHostname")
-            .map(|v| v.to_lowercase() == "true" || v == "1")
+        let tls_min_version = get_ci(general, "TlsMinVersion")
+            .unwrap_or("1.2")
+            .trim()
+            .to_string();
+        let verify_hostname = get_ci(general, "VerifyHostname")
+            .map(parse_bool)
             .unwrap_or(false); // Off by default: broker certificates on real fabrics carry no matching SAN
-        let tls_ciphers = general.get("TlsCiphers").map(|s| s.to_string());
+        let tls_ciphers = get_ci(general, "TlsCiphers").map(|s| s.to_string());
 
-        let brokers_sec = conf
-            .section(Some("Brokers"))
-            .ok_or("Missing [Brokers] section")?;
+        let brokers_sec = section_ci(&conf, "Brokers").ok_or("Missing [Brokers] section")?;
         let mut brokers = Vec::new();
-        // The value is guid;port;host;ip
         for (_, v) in brokers_sec.iter() {
-            let parts: Vec<&str> = v.split(';').collect();
-            if parts.len() >= 4 {
-                brokers.push(Broker {
-                    id: parts[0].to_string(),
-                    port: parts[1].parse().unwrap_or(8883),
-                    host: parts[2].to_string(),
-                    ip: parts[3].to_string(),
-                });
+            if let Some(broker) = parse_broker_line(v) {
+                brokers.push(broker);
             }
         }
 
-        let syslog = conf.section(Some("Syslog"));
-        let syslog_host = syslog.and_then(|s| s.get("Host")).map(|s| s.to_string());
+        let syslog = section_ci(&conf, "Syslog");
+        let syslog_host = syslog
+            .and_then(|s| get_ci(s, "Host"))
+            .map(|s| s.trim().to_string());
         let syslog_port = syslog
-            .and_then(|s| s.get("Port"))
-            .and_then(|p| p.parse().ok());
+            .and_then(|s| get_ci(s, "Port"))
+            .and_then(|p| p.trim().parse().ok());
         let syslog_protocol = syslog
-            .and_then(|s| s.get("Protocol"))
-            .map(|s| s.to_string());
+            .and_then(|s| get_ci(s, "Protocol"))
+            .map(|s| s.trim().to_string());
 
-        let detections = conf.section(Some("Detections"));
+        let detections = section_ci(&conf, "Detections");
         let service_ttl_grace_period_mins = detections
-            .and_then(|d| d.get("ServiceTtlGracePeriodMins"))
-            .and_then(|v| v.parse().ok())
+            .and_then(|d| get_ci(d, "ServiceTtlGracePeriodMins"))
+            .and_then(|v| v.trim().parse().ok())
             .unwrap_or(5);
 
         let allowed_thumbprints = detections
-            .and_then(|d| d.get("AllowedThumbprints"))
-            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .and_then(|d| get_ci(d, "AllowedThumbprints"))
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let sensitive_topics = detections
-            .and_then(|d| d.get("SensitiveTopics"))
-            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .and_then(|d| get_ci(d, "SensitiveTopics"))
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let webhook = conf.section(Some("Webhook"));
-        let webhook_url = webhook.and_then(|w| w.get("Url")).map(|s| s.to_string());
+        let webhook = section_ci(&conf, "Webhook");
+        let webhook_url = webhook
+            .and_then(|w| get_ci(w, "Url"))
+            .map(|s| s.trim().to_string());
 
-        let kafka = conf.section(Some("Kafka"));
-        let kafka_brokers = kafka.and_then(|k| k.get("Brokers")).map(|s| s.to_string());
-        let kafka_topic = kafka.and_then(|k| k.get("Topic")).map(|s| s.to_string());
+        let kafka = section_ci(&conf, "Kafka");
+        let kafka_brokers = kafka
+            .and_then(|k| get_ci(k, "Brokers"))
+            .map(|s| s.trim().to_string());
+        let kafka_topic = kafka
+            .and_then(|k| get_ci(k, "Topic"))
+            .map(|s| s.trim().to_string());
 
         Ok(Self {
             broker_cert_chain,
@@ -233,6 +330,63 @@ mod tests {
         assert_eq!(config.service_ttl_grace_period_mins, 5);
         assert_eq!(config.syslog_host.unwrap(), "127.0.0.1");
         assert_eq!(config.webhook_url.unwrap(), "http://siem.local:8080/ingest");
-        assert_eq!(config.kafka_topic.unwrap(), "dxl-events");
+        assert_eq!(
+            config.kafka_topic.unwrap(),
+            "http://siem.local:8080/ingest"
+                .split('/')
+                .next()
+                .map(|_| "dxl-events")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_load_python_lowercase_and_short_broker_formats() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "[Certs]").unwrap();
+        writeln!(file, "brokercertchain = ca-bundle.crt").unwrap();
+        writeln!(file, "certfile = client.crt").unwrap();
+        writeln!(file, "privatekey = client.key").unwrap();
+        writeln!(file, "[General]").unwrap();
+        writeln!(file, "clientid = {{abcd}}").unwrap();
+        writeln!(file, "verifyhostname = yes").unwrap();
+        writeln!(file, "tlsminversion = TLSv1.3").unwrap();
+        writeln!(file, "[Brokers]").unwrap();
+        writeln!(file, "three_field = id1 ; 8883 ; broker1.local").unwrap();
+        writeln!(file, "two_field = 18883;broker2.local").unwrap();
+        writeln!(file, "empty_ip = id3;28883;broker3.local;").unwrap();
+
+        let config = DxlConfig::load(file.path()).unwrap();
+        assert_eq!(config.client_id, "{abcd}");
+        assert!(config.verify_hostname);
+        assert_eq!(config.tls_min_version, "TLSv1.3");
+        assert_eq!(config.brokers.len(), 3);
+        assert_eq!(
+            config.brokers[0],
+            Broker {
+                id: "id1".to_string(),
+                port: 8883,
+                host: "broker1.local".to_string(),
+                ip: "broker1.local".to_string(),
+            }
+        );
+        assert_eq!(
+            config.brokers[1],
+            Broker {
+                id: "".to_string(),
+                port: 18883,
+                host: "broker2.local".to_string(),
+                ip: "broker2.local".to_string(),
+            }
+        );
+        assert_eq!(
+            config.brokers[2],
+            Broker {
+                id: "id3".to_string(),
+                port: 28883,
+                host: "broker3.local".to_string(),
+                ip: "broker3.local".to_string(),
+            }
+        );
     }
 }

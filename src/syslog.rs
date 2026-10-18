@@ -14,13 +14,20 @@ pub async fn start_syslog_sender(config: &DxlConfig) -> Option<mpsc::Sender<Stri
         .to_lowercase();
 
     let (tx, mut rx) = mpsc::channel::<String>(1000);
-    let addr = format!("{}:{}", host, port);
+    let clean_host = host.trim_start_matches('[').trim_end_matches(']');
+    let is_ipv6 = clean_host.contains(':');
+    let addr = if is_ipv6 {
+        format!("[{}]:{}", clean_host, port)
+    } else {
+        format!("{}:{}", clean_host, port)
+    };
 
     info!("Starting Syslog sender to {} via {}", addr, protocol);
 
     tokio::spawn(async move {
         if protocol == "udp" {
-            let socket = match UdpSocket::bind("0.0.0.0:0").await {
+            let bind_addr = if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" };
+            let socket = match UdpSocket::bind(bind_addr).await {
                 Ok(s) => s,
                 Err(e) => {
                     error!("Failed to bind UDP socket for syslog: {}", e);
@@ -29,9 +36,9 @@ pub async fn start_syslog_sender(config: &DxlConfig) -> Option<mpsc::Sender<Stri
             };
 
             while let Some(msg) = rx.recv().await {
-                // RFC-5424 PRI = 134 (local0, info)
+                // RFC-5424 PRI = 134 (local0, info); no trailing LF on UDP datagrams (RFC 5426 §3.2)
                 let formatted = format!(
-                    "<134>1 {} {} {} - - - {}\n",
+                    "<134>1 {} {} {} - - - {}",
                     chrono::Utc::now().to_rfc3339(),
                     "opendxl-siem-sensor",
                     "OpenDXL",

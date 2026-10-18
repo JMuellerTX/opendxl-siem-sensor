@@ -68,8 +68,11 @@ impl DetectionEngine {
                 ));
             }
 
-            // Check publishers (ignore known brokers)
-            if !self.brokers.contains_key(source_client_id)
+            // Check publishers on non-broker topics (broker events under
+            // /mcafee/event/dxl/ carry the broker's GUID as source_client_id;
+            // client connect and service register events are checked above/below).
+            if !topic.starts_with("/mcafee/event/dxl/")
+                && !self.brokers.contains_key(source_client_id)
                 && !source_client_id.is_empty()
                 && !self
                     .allowed_thumbprints
@@ -148,17 +151,33 @@ impl DetectionEngine {
             }
         } else if topic.ends_with("/unregister")
             && let Some(guid) = payload.get("serviceGuid").and_then(|v| v.as_str())
+            && let Some(state) = self.services.remove(guid)
         {
-            self.services.remove(guid);
+            // When the broker's own TTL Reaper unregisters an expired service,
+            // it fires svcregistry/unregister right at (ttlMins + grace) * 60.
+            // Check whether the service was already past its TTL+grace window
+            // so the broker event does not preempt poll_timeouts().
+            let now_secs = now / 1000;
+            let expiry = state.registration_time_secs
+                + (state.ttl_mins as i64 * 60)
+                + (self.grace_period_mins as i64 * 60);
+            if !state.reported && now_secs >= expiry {
+                alerts.push(Self::build_detection(
+                    now,
+                    &metadata,
+                    "Service TTL Expired",
+                    &format!(
+                        "Service {} ({}) TTL expired without unregister",
+                        state.guid, state.service_type
+                    ),
+                    None,
+                ));
+            }
         }
 
         // (c) Sensitive Topic Publisher
         for sensitive_topic in &self.sensitive_topics {
-            // Very naive glob matching logic for topics
-            if topic == sensitive_topic
-                || (sensitive_topic.ends_with("/#")
-                    && topic.starts_with(&sensitive_topic[..sensitive_topic.len() - 1]))
-            {
+            if topic_matches(sensitive_topic, topic) {
                 alerts.push(Self::build_detection(
                     now,
                     &metadata,
@@ -191,9 +210,7 @@ impl DetectionEngine {
         );
 
         // (e) Fabric Change
-        if topic.contains("fabricchange") || topic.contains("brokerregistry/brokerstate") {
-            // Simplified check: usually we'd parse the bridge states
-            // Here we just alert that a fabric change occurred, which could indicate a bridge up/down
+        if topic.contains("fabricchange") {
             alerts.push(Self::build_detection(
                 now,
                 &metadata,
@@ -201,6 +218,28 @@ impl DetectionEngine {
                 "A fabric topology change or broker state change was detected.",
                 None,
             ));
+        } else if topic.contains("brokerregistry/brokerstate") {
+            let changed = if let Some(guid) = payload.get("guid").and_then(|v| v.as_str()) {
+                let prev = self.brokers.insert(guid.to_string(), payload.clone());
+                match prev {
+                    None => true,
+                    Some(old) => {
+                        old.get("bridges") != payload.get("bridges")
+                            || old.get("startTime") != payload.get("startTime")
+                    }
+                }
+            } else {
+                true
+            };
+            if changed {
+                alerts.push(Self::build_detection(
+                    now,
+                    &metadata,
+                    "Fabric Change Detected",
+                    "A fabric topology change or broker state change was detected.",
+                    None,
+                ));
+            }
         }
 
         alerts
@@ -333,6 +372,37 @@ impl DetectionEngine {
     }
 }
 
+fn topic_matches(filter: &str, topic: &str) -> bool {
+    if filter == "#" || filter == topic {
+        return true;
+    }
+    let filter_levels: Vec<&str> = filter.split('/').collect();
+    let topic_levels: Vec<&str> = topic.split('/').collect();
+
+    for (i, f_level) in filter_levels.iter().enumerate() {
+        if *f_level == "#" {
+            return true;
+        }
+        let Some(t_level) = topic_levels.get(i) else {
+            // In MQTT 3.1.1 §4.7.1.2, "/a/b/#" also matches "/a/b"
+            return i + 1 == filter_levels.len() - 1
+                && filter_levels[i + 1] == "#"
+                && *f_level == topic_levels[i - 1];
+        };
+        if *f_level != "+" && *f_level != *t_level {
+            return false;
+        }
+        // If the next filter level is a trailing "#", and we matched up to the final topic level
+        if i + 1 == topic_levels.len()
+            && i + 2 == filter_levels.len()
+            && filter_levels[i + 1] == "#"
+        {
+            return true;
+        }
+    }
+    filter_levels.len() == topic_levels.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +442,101 @@ mod tests {
         } else {
             panic!("Expected DetectionFinding");
         }
+    }
+
+    #[test]
+    fn test_ttl_expiry_on_broker_unregister_event() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let now_secs = Utc::now().timestamp();
+
+        let reg_payload = json!({
+            "serviceGuid": "expired-svc",
+            "serviceType": "/test/expired",
+            "ttlMins": 10,
+            "registrationTime": now_secs - 905 // >= (10 + 5) * 60 = 900
+        });
+        engine.process_event(
+            "/mcafee/event/dxl/svcregistry/register",
+            &reg_payload,
+            "{broker-guid}",
+        );
+
+        let unreg_payload = json!({ "serviceGuid": "expired-svc" });
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/svcregistry/unregister",
+            &unreg_payload,
+            "{broker-guid}",
+        );
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Service TTL Expired");
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+    }
+
+    #[test]
+    fn test_broker_event_does_not_trigger_unknown_publisher_thumbprint_before_sync() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let payload = json!({
+            "clientGuid": "allowed_hash:instance-1",
+            "certThumbprint": "allowed_hash",
+            "tlsVersion": "TLSv1.3",
+            "cipher": "TLS_AES_256_GCM_SHA384"
+        });
+        // Even before brokerregistry/query populates engine.brokers, a broker event's
+        // source_client_id ({broker-guid}) must not be flagged as an unknown client thumbprint.
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/clientregistry/connect",
+            &payload,
+            "{unseen-broker-guid}",
+        );
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn test_brokerstate_updates_brokers_map_and_deduplicates_unchanged_state() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let state = json!({
+            "guid": "{broker-1}",
+            "bridges": ["{broker-2}"],
+            "startTime": 1700000000
+        });
+        let first = engine.process_event(
+            "/mcafee/event/dxl/brokerregistry/brokerstate",
+            &state,
+            "{broker-1}",
+        );
+        assert_eq!(first.len(), 1);
+        assert!(engine.brokers.contains_key("{broker-1}"));
+
+        // Identical periodic heartbeat must not re-fire
+        let second = engine.process_event(
+            "/mcafee/event/dxl/brokerregistry/brokerstate",
+            &state,
+            "{broker-1}",
+        );
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn test_mqtt_topic_wildcards() {
+        assert!(topic_matches(
+            "/mcafee/service/tie/#",
+            "/mcafee/service/tie"
+        ));
+        assert!(topic_matches(
+            "/mcafee/service/tie/#",
+            "/mcafee/service/tie/file/reputation"
+        ));
+        assert!(topic_matches(
+            "/mcafee/service/+/file/reputation",
+            "/mcafee/service/tie/file/reputation"
+        ));
+        assert!(!topic_matches(
+            "/mcafee/service/+/file/reputation",
+            "/mcafee/service/tie/cert/reputation"
+        ));
     }
 
     #[test]

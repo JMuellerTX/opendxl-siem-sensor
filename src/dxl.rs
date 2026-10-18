@@ -73,8 +73,13 @@ fn read_str_or_bin<R: Read>(rd: &mut R) -> Result<Vec<u8>, Box<dyn std::error::E
         rmp::Marker::Bin32 => read_u32(rd)?,
         _ => return Err(format!("Expected string or bin marker, got {:?}", marker).into()),
     };
-    let mut buf = vec![0; len as usize];
-    rd.read_exact(&mut buf)?;
+    let mut buf = Vec::with_capacity((len as usize).min(65536));
+    rd.take(len as u64).read_to_end(&mut buf)?;
+    if buf.len() != len as usize {
+        return Err(
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "unexpected EOF").into(),
+        );
+    }
     Ok(buf)
 }
 
@@ -85,7 +90,7 @@ fn read_string<R: Read>(rd: &mut R) -> Result<String, Box<dyn std::error::Error>
 
 fn read_string_array<R: Read>(rd: &mut R) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let len = decode::read_array_len(rd)?;
-    let mut arr = Vec::with_capacity(len as usize);
+    let mut arr = Vec::with_capacity((len as usize).min(1024));
     for _ in 0..len {
         arr.push(read_string(rd)?);
     }
@@ -120,8 +125,18 @@ pub fn parse_dxl_message(raw: &[u8]) -> Result<DxlMessage, Box<dyn std::error::E
     } else if message_type == MESSAGE_TYPE_ERROR {
         request_message_id = Some(read_string(&mut cursor)?);
         service_id = Some(read_string(&mut cursor)?);
-        error_code = Some(decode::read_int(&mut cursor)?);
+        // Python and JavaScript clients pack fabric error codes such as
+        // 0x80000001 (FABRICSERVICEUNAVAILABLE) as an unsigned uint32
+        // (0xce 80 00 00 01 = 2147483649), whereas the C++ broker and Java
+        // client pack them as a signed int32 (0xd2 80 00 00 01 = -2147483647).
+        let raw_code: i64 = decode::read_int(&mut cursor)?;
+        if !(i32::MIN as i64..=u32::MAX as i64).contains(&raw_code) {
+            return Err(format!("Error code out of 32-bit range: {}", raw_code).into());
+        }
+        error_code = Some(raw_code as u32 as i32);
         error_message = Some(read_string(&mut cursor)?);
+    } else if message_type != MESSAGE_TYPE_EVENT {
+        return Err(format!("Unknown DXL message type: {}", message_type).into());
     }
 
     let mut other_fields = HashMap::new();
@@ -317,5 +332,36 @@ mod tests {
                 assert_eq!(raw_bytes, encoded, "Roundtrip failed for vector {}", name);
             }
         }
+    }
+
+    #[test]
+    fn test_error_response_unsigned_and_signed_high_bit_error_code() {
+        // Python/JS pack 0x80000001 as uint32 (ce 80 00 00 01), while Broker/Java
+        // pack it as signed int32 (d2 80 00 00 01). Both must decode to the same i32.
+        let uint32_hex = "0203a47b69647da0a09090a0a57b7265717da0ce80000001a56572726f7290a090";
+        let int32_hex = "0203a47b69647da0a09090a0a57b7265717da0d280000001a56572726f7290a090";
+
+        let from_py_js = parse_dxl_message(&from_hex(uint32_hex))
+            .expect("Python/JS uint32 0x80000001 error code must parse");
+        let from_broker_java = parse_dxl_message(&from_hex(int32_hex))
+            .expect("Broker/Java int32 0x80000001 error code must parse");
+
+        assert_eq!(from_py_js.error_code, Some(0x80000001u32 as i32));
+        assert_eq!(from_py_js.error_code, from_broker_java.error_code);
+        assert_eq!(from_py_js.error_message.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn test_unknown_message_type_is_rejected() {
+        // message_type = 99 (0x63)
+        let bad_hex = "0263a47b69647da0a09090a090a090";
+        assert!(parse_dxl_message(&from_hex(bad_hex)).is_err());
+    }
+
+    #[test]
+    fn test_truncated_large_str32_returns_err_without_oom() {
+        // version=3, type=2, messageId claims Str32 of 0xFFFFFFFF bytes but buffer ends
+        let truncated = from_hex("0302dbffffffff4142");
+        assert!(parse_dxl_message(&truncated).is_err());
     }
 }
