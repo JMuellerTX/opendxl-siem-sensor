@@ -50,6 +50,8 @@ pub fn is_known_broker_event_topic(topic: &str) -> bool {
     KNOWN_BROKER_EVENT_TOPICS.contains(&topic)
 }
 
+const MAX_RATE_KEYS: usize = 10_000;
+
 pub struct DetectionEngine {
     grace_period_mins: u32,
     allowed_thumbprints: Vec<String>,
@@ -61,12 +63,12 @@ pub struct DetectionEngine {
 }
 
 pub struct ServiceState {
-    guid: String,
-    service_type: String,
-    client_guid: Option<String>,
-    registration_time_secs: i64,
-    ttl_mins: u32,
-    reported: bool,
+    pub guid: String,
+    pub service_type: String,
+    pub client_guid: Option<String>,
+    pub registration_time_secs: i64,
+    pub ttl_mins: u32,
+    pub reported: bool,
 }
 
 impl DetectionEngine {
@@ -85,6 +87,10 @@ impl DetectionEngine {
             topic_rates: HashMap::new(),
             brokers: HashMap::new(),
         }
+    }
+
+    pub fn is_known_broker(&self, id: &str) -> bool {
+        self.brokers.contains_key(id)
     }
 
     pub fn report_spoofed_broker_event(
@@ -117,9 +123,21 @@ impl DetectionEngine {
         payload: &serde_json::Value,
         source_client_id: &str,
     ) -> Vec<OcsfEvent> {
+        self.process_event_with_cert(topic, payload, source_client_id, None)
+    }
+
+    pub fn process_event_with_cert(
+        &mut self,
+        topic: &str,
+        payload: &serde_json::Value,
+        source_client_id: &str,
+        cert_thumbprint: Option<&str>,
+    ) -> Vec<OcsfEvent> {
         let mut alerts = Vec::new();
         let now = Utc::now().timestamp_millis();
         let metadata = OcsfMetadata::default();
+        let cert_clean = cert_thumbprint.map(str::trim).filter(|s| !s.is_empty());
+        let publisher_id = cert_clean.unwrap_or(source_client_id);
 
         // Guard against spoofed broker events under /mcafee/event/dxl/#
         if topic.starts_with("/mcafee/event/dxl/") {
@@ -130,13 +148,26 @@ impl DetectionEngine {
                     "Spoofed Broker Event",
                     &format!(
                         "Client {} published to unrecognized broker event topic {}",
-                        source_client_id, topic
+                        publisher_id, topic
                     ),
-                    if source_client_id.is_empty() {
+                    if publisher_id.is_empty() {
                         None
                     } else {
-                        Some(source_client_id.to_string())
+                        Some(publisher_id.to_string())
                     },
+                ));
+                return alerts;
+            }
+            if source_client_id.trim().is_empty() {
+                alerts.push(Self::build_detection(
+                    now,
+                    &metadata,
+                    "Spoofed Broker Event",
+                    &format!(
+                        "Non-broker client published on broker topic {} with empty source_client_id",
+                        topic
+                    ),
+                    cert_clean.map(|s| s.to_string()),
                 ));
                 return alerts;
             }
@@ -147,6 +178,7 @@ impl DetectionEngine {
                 if is_hex_thumbprint(source_client_id)
                     || claimed_guid.is_some_and(is_hex_thumbprint)
                     || guid_mismatch
+                    || (!self.brokers.is_empty() && !self.is_known_broker(source_client_id))
                 {
                     alerts.push(Self::build_detection(
                         now,
@@ -154,29 +186,26 @@ impl DetectionEngine {
                         "Spoofed Broker Event",
                         &format!(
                             "Non-broker client {} attempted to spoof brokerstate event",
-                            source_client_id
+                            publisher_id
                         ),
-                        if source_client_id.is_empty() {
+                        if publisher_id.is_empty() {
                             None
                         } else {
-                            Some(source_client_id.to_string())
+                            Some(publisher_id.to_string())
                         },
                     ));
                     return alerts;
                 }
-            } else if !self.brokers.is_empty()
-                && !source_client_id.is_empty()
-                && !self.brokers.contains_key(source_client_id)
-            {
+            } else if !self.brokers.is_empty() && !self.is_known_broker(source_client_id) {
                 alerts.push(Self::build_detection(
                     now,
                     &metadata,
                     "Spoofed Broker Event",
                     &format!(
                         "Non-broker client {} attempted to publish broker event on {}",
-                        source_client_id, topic
+                        publisher_id, topic
                     ),
-                    Some(source_client_id.to_string()),
+                    Some(publisher_id.to_string()),
                 ));
                 return alerts;
             }
@@ -213,16 +242,16 @@ impl DetectionEngine {
             // client connect and service register events are checked above/below).
             if !topic.starts_with("/mcafee/event/dxl/")
                 && !self.brokers.contains_key(source_client_id)
-                && !source_client_id.is_empty()
+                && !publisher_id.is_empty()
             {
-                let norm = normalize_thumbprint(source_client_id);
+                let norm = normalize_thumbprint(publisher_id);
                 if !norm.is_empty() && !self.allowed_thumbprints.contains(&norm) {
                     alerts.push(Self::build_detection(
                         now,
                         &metadata,
                         "Unknown Certificate Thumbprint",
-                        &format!("Publisher with unknown thumbprint: {}", source_client_id),
-                        Some(source_client_id.to_string()),
+                        &format!("Publisher with unknown thumbprint: {}", publisher_id),
+                        Some(publisher_id.to_string()),
                     ));
                 }
             }
@@ -302,18 +331,19 @@ impl DetectionEngine {
                         ),
                         Some(new_client.to_string()),
                     ));
+                } else {
+                    self.services.insert(
+                        guid.to_string(),
+                        ServiceState {
+                            guid: guid.to_string(),
+                            service_type: svc_type.to_string(),
+                            client_guid: new_owner,
+                            registration_time_secs: reg_time,
+                            ttl_mins: ttl as u32,
+                            reported: false,
+                        },
+                    );
                 }
-                self.services.insert(
-                    guid.to_string(),
-                    ServiceState {
-                        guid: guid.to_string(),
-                        service_type: svc_type.to_string(),
-                        client_guid: new_owner,
-                        registration_time_secs: reg_time,
-                        ttl_mins: ttl as u32,
-                        reported: false,
-                    },
-                );
             }
         } else if topic == TOPIC_SVC_UNREGISTER
             && let Some(guid) = payload.get("serviceGuid").and_then(|v| v.as_str())
@@ -361,27 +391,35 @@ impl DetectionEngine {
 
         // Payload vs Envelope Identity Mismatch (Framing protection on non-broker topics)
         if !topic.starts_with("/mcafee/event/dxl/")
-            && !source_client_id.is_empty()
+            && (!source_client_id.is_empty() || cert_clean.is_some())
             && !self.brokers.contains_key(source_client_id)
         {
             let sender_norm = normalize_identity(source_client_id);
+            let cert_norm = cert_clean.map(normalize_identity).unwrap_or_default();
             for field in ["agentGuid", "clientGuid", "certThumbprint"] {
+                if field == "agentGuid" && topic == "/mcafee/event/tie/file/firstinstance" {
+                    continue;
+                }
                 if let Some(claimed) = payload.get(field).and_then(|v| v.as_str()) {
                     let claimed_norm = normalize_identity(claimed);
-                    if !claimed_norm.is_empty()
-                        && !sender_norm.is_empty()
-                        && claimed_norm != sender_norm
-                    {
-                        alerts.push(Self::build_detection(
-                            now,
-                            &metadata,
-                            "Payload Identity Spoofing",
-                            &format!(
-                                "Client {} published on {} claiming {}={}",
-                                source_client_id, topic, field, claimed
-                            ),
-                            Some(source_client_id.to_string()),
-                        ));
+                    if !claimed_norm.is_empty() {
+                        let matches_sender = !sender_norm.is_empty() && claimed_norm == sender_norm;
+                        let matches_cert = !cert_norm.is_empty() && claimed_norm == cert_norm;
+                        if (!sender_norm.is_empty() || !cert_norm.is_empty())
+                            && !matches_sender
+                            && !matches_cert
+                        {
+                            alerts.push(Self::build_detection(
+                                now,
+                                &metadata,
+                                "Payload Identity Spoofing",
+                                &format!(
+                                    "Client {} published on {} claiming {}={}",
+                                    publisher_id, topic, field, claimed
+                                ),
+                                Some(publisher_id.to_string()),
+                            ));
+                        }
                     }
                 }
             }
@@ -396,9 +434,9 @@ impl DetectionEngine {
                     "Sensitive Topic Published",
                     &format!(
                         "Client {} published to sensitive topic {}",
-                        source_client_id, topic
+                        publisher_id, topic
                     ),
-                    Some(source_client_id.to_string()),
+                    Some(publisher_id.to_string()),
                 ));
             }
         }
@@ -406,7 +444,7 @@ impl DetectionEngine {
         // (d) Rate/Size Anomaly (Simplified to simple count rate over 60s window)
         Self::track_rate(
             &mut self.client_rates,
-            source_client_id,
+            publisher_id,
             now,
             &mut alerts,
             &metadata,
@@ -519,6 +557,21 @@ impl DetectionEngine {
         metadata: &OcsfMetadata,
         title: &str,
     ) {
+        if !rates.contains_key(key) && rates.len() >= MAX_RATE_KEYS {
+            rates.retain(|_, q| {
+                while let Some(&t) = q.front() {
+                    if now - t > 60_000 {
+                        q.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                !q.is_empty()
+            });
+            if rates.len() >= MAX_RATE_KEYS {
+                return;
+            }
+        }
         let entry = rates.entry(key.to_string()).or_default();
         entry.push_back(now);
         // Remove older than 60 seconds
@@ -1109,6 +1162,13 @@ mod tests {
         } else {
             panic!("Expected DetectionFinding");
         }
+        assert_eq!(
+            engine
+                .services
+                .get("{epo-service-guid}")
+                .and_then(|s| s.client_guid.as_deref()),
+            Some("allowed_hash")
+        );
     }
 
     #[test]
@@ -1157,6 +1217,58 @@ mod tests {
         } else {
             panic!("Expected DetectionFinding");
         }
+    }
+
+    #[test]
+    fn test_managed_agent_and_firstinstance_do_not_false_positive_on_payload_identity() {
+        let mut config = test_config();
+        config.allowed_thumbprints = vec!["435dfd470f727437c7cb4f07cba1f9a1f4272656".to_string()];
+        let mut engine = DetectionEngine::new(&config);
+
+        // (a) Managed agent where source_client_id = "{abc5...}", cert_thumbprint = Some("435dfd..."),
+        // and payload agentGuid = "{abc5...}" -> NO false positive
+        let legit_detection = json!({
+            "agentGuid": "{abc5d2c6-e959-11e3-baeb-005056c00009}",
+            "name": "LEGIT.EXE"
+        });
+        let alerts = engine.process_event_with_cert(
+            "/mcafee/event/tie/file/detection",
+            &legit_detection,
+            "{abc5d2c6-e959-11e3-baeb-005056c00009}",
+            Some("435dfd470f727437c7cb4f07cba1f9a1f4272656"),
+        );
+        assert!(alerts.is_empty());
+
+        // (b) Managed or unmanaged client spoofing another victim's agentGuid -> fires Payload Identity Spoofing
+        let spoofed_detection = json!({
+            "agentGuid": "{68125cd6-a5d8-11e6-348e-000c29663178}",
+            "name": "SPOOFED.EXE"
+        });
+        let alerts = engine.process_event_with_cert(
+            "/mcafee/event/tie/file/detection",
+            &spoofed_detection,
+            "{abc5d2c6-e959-11e3-baeb-005056c00009}",
+            Some("435dfd470f727437c7cb4f07cba1f9a1f4272656"),
+        );
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Payload Identity Spoofing");
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+
+        // (c) /mcafee/event/tie/file/firstinstance (published by TIE Server with endpoint's agentGuid) -> NO false positive
+        let first_instance = json!({
+            "agentGuid": "{68125cd6-a5d8-11e6-348e-000c29663178}",
+            "name": "FIRST_SEEN.EXE"
+        });
+        let alerts = engine.process_event_with_cert(
+            "/mcafee/event/tie/file/firstinstance",
+            &first_instance,
+            "{tie-server-guid}",
+            Some("435dfd470f727437c7cb4f07cba1f9a1f4272656"),
+        );
+        assert!(alerts.is_empty());
     }
 
     #[test]

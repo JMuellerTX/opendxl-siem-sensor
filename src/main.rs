@@ -207,13 +207,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                 }
                             } else {
-                                let publisher_id = msg
-                                    .other_fields
-                                    .get("dxl.certs")
-                                    .and_then(|certs| {
+                                let cert_thumbprint =
+                                    msg.other_fields.get("dxl.certs").and_then(|certs| {
                                         certs.split(';').map(str::trim).rfind(|s| !s.is_empty())
-                                    })
-                                    .unwrap_or(&msg.source_client_id);
+                                    });
+                                let publisher_id = cert_thumbprint.unwrap_or(&msg.source_client_id);
                                 let alerts = if let Some(reason) = is_spoofed_broker_envelope(
                                     &publish.topic,
                                     &msg,
@@ -226,10 +224,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     )]
                                 } else {
                                     let value = payload_json.unwrap_or(serde_json::Value::Null);
-                                    detection_engine.process_event(
+                                    detection_engine.process_event_with_cert(
                                         &publish.topic,
                                         &value,
-                                        publisher_id,
+                                        &msg.source_client_id,
+                                        cert_thumbprint,
                                     )
                                 };
                                 for alert in alerts {
@@ -495,6 +494,9 @@ fn is_spoofed_broker_envelope(
     if !detections::is_known_broker_event_topic(topic) {
         return Some("unrecognized broker event topic");
     }
+    if msg.source_client_id.trim().is_empty() {
+        return Some("empty source_client_id on broker event");
+    }
     if msg
         .other_fields
         .get("dxl.certs")
@@ -505,11 +507,19 @@ fn is_spoofed_broker_envelope(
     if detections::is_hex_thumbprint(&msg.source_client_id) {
         return Some("source_client_id is a client certificate thumbprint");
     }
-    if !engine.brokers.is_empty()
-        && topic != detections::TOPIC_BROKER_STATE
-        && !msg.source_client_id.is_empty()
-        && !engine.brokers.contains_key(&msg.source_client_id)
+    if topic == detections::TOPIC_BROKER_STATE
+        && let Ok(raw) = std::str::from_utf8(&msg.payload)
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(raw)
     {
+        let claimed_guid = val.get("guid").and_then(|v| v.as_str());
+        if claimed_guid.is_some_and(detections::is_hex_thumbprint) {
+            return Some("brokerstate payload guid is a certificate thumbprint");
+        }
+        if claimed_guid.is_some_and(|g| g != msg.source_client_id) {
+            return Some("brokerstate payload guid does not match source_client_id");
+        }
+    }
+    if !engine.brokers.is_empty() && !engine.is_known_broker(&msg.source_client_id) {
         return Some("source_client_id is not a known broker");
     }
     None
@@ -775,6 +785,28 @@ mod tests {
                 &engine
             ),
             Some("source_client_id is a client certificate thumbprint")
+        );
+
+        let mut empty_src_msg = sample_dxl_message(br#"{"clientGuid":"victim-guid"}"#);
+        empty_src_msg.source_client_id = "   ".to_string();
+        assert_eq!(
+            is_spoofed_broker_envelope(
+                "/mcafee/event/dxl/clientregistry/connect",
+                &empty_src_msg,
+                &engine
+            ),
+            Some("empty source_client_id on broker event")
+        );
+
+        let mut mismatch_brokerstate = sample_dxl_message(br#"{"guid":"{other-broker}"}"#);
+        mismatch_brokerstate.source_client_id = "{attacker-client}".to_string();
+        assert_eq!(
+            is_spoofed_broker_envelope(
+                "/mcafee/event/dxl/brokerregistry/brokerstate",
+                &mismatch_brokerstate,
+                &engine
+            ),
+            Some("brokerstate payload guid does not match source_client_id")
         );
     }
 
