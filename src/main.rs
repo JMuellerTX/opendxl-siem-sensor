@@ -153,10 +153,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
 
-                            // Feed into Detection Engine (use Value::Null when payload is empty or non-JSON)
-                            let payload_json = std::str::from_utf8(&msg.payload)
-                                .ok()
-                                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+                            // Feed into Detection Engine (preserve plain-text UTF-8 payloads such as revocation/list)
+                            let payload_json = decode_payload_value(&msg.payload);
 
                             if msg.message_type == dxl::MESSAGE_TYPE_RESPONSE
                                 && msg.request_message_id.as_ref() == Some(&svc_query_msg_id)
@@ -196,7 +194,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                 }
                             } else {
-                                let value = payload_json.unwrap_or(serde_json::Value::Null);
                                 let publisher_id = msg
                                     .other_fields
                                     .get("dxl.certs")
@@ -204,11 +201,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         certs.split(';').map(str::trim).rfind(|s| !s.is_empty())
                                     })
                                     .unwrap_or(&msg.source_client_id);
-                                let alerts = detection_engine.process_event(
+                                let alerts = if let Some(reason) = is_spoofed_broker_envelope(
                                     &publish.topic,
-                                    &value,
-                                    publisher_id,
-                                );
+                                    &msg,
+                                    &detection_engine,
+                                ) {
+                                    vec![detection_engine.report_spoofed_broker_event(
+                                        &publish.topic,
+                                        publisher_id,
+                                        reason,
+                                    )]
+                                } else {
+                                    let value = payload_json.unwrap_or(serde_json::Value::Null);
+                                    detection_engine.process_event(
+                                        &publish.topic,
+                                        &value,
+                                        publisher_id,
+                                    )
+                                };
                                 for alert in alerts {
                                     dispatch_record(
                                         &cli,
@@ -446,11 +456,53 @@ fn plain(event: &OcsfEvent, kind: Kind) -> String {
     )
 }
 
+fn decode_payload_value(payload: &[u8]) -> Option<serde_json::Value> {
+    let raw = std::str::from_utf8(payload).ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(
+        serde_json::from_str::<serde_json::Value>(raw)
+            .unwrap_or_else(|_| serde_json::Value::String(raw.to_string())),
+    )
+}
+
+fn is_spoofed_broker_envelope(
+    topic: &str,
+    msg: &DxlMessage,
+    engine: &DetectionEngine,
+) -> Option<&'static str> {
+    if !topic.starts_with("/mcafee/event/dxl/") {
+        return None;
+    }
+    if !detections::is_known_broker_event_topic(topic) {
+        return Some("unrecognized broker event topic");
+    }
+    if msg
+        .other_fields
+        .get("dxl.certs")
+        .is_some_and(|certs| !certs.trim().is_empty())
+    {
+        return Some("envelope contains client dxl.certs");
+    }
+    if !engine.brokers.is_empty()
+        && topic != detections::TOPIC_BROKER_STATE
+        && !msg.source_client_id.is_empty()
+        && !engine.brokers.contains_key(&msg.source_client_id)
+    {
+        return Some("source_client_id is not a known broker");
+    }
+    None
+}
+
 fn handle_dxl_message(
     topic: &str,
     msg: &DxlMessage,
     engine: &DetectionEngine,
 ) -> Option<OcsfEvent> {
+    if is_spoofed_broker_envelope(topic, msg, engine).is_some() {
+        return None;
+    }
     if let Ok(json_str) = std::str::from_utf8(&msg.payload)
         && let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str)
     {
@@ -664,5 +716,50 @@ mod tests {
             }
             other => panic!("expected ApiActivity, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn client_envelope_on_broker_topic_is_rejected_even_before_broker_sync() {
+        let engine = DetectionEngine::new(&DxlConfig::default());
+        let mut spoofed_msg = sample_dxl_message(
+            br#"{"clientGuid":"victim-guid","certThumbprint":"victim-thumb","cipher":"TLS_RSA_WITH_AES_128_CBC_SHA"}"#,
+        );
+        spoofed_msg.other_fields.insert(
+            "dxl.certs".to_string(),
+            "attacker-leaf-thumbprint".to_string(),
+        );
+
+        assert_eq!(
+            is_spoofed_broker_envelope(
+                "/mcafee/event/dxl/clientregistry/connect",
+                &spoofed_msg,
+                &engine
+            ),
+            Some("envelope contains client dxl.certs")
+        );
+        assert!(
+            handle_dxl_message(
+                "/mcafee/event/dxl/clientregistry/connect",
+                &spoofed_msg,
+                &engine
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn decode_payload_value_handles_json_plain_text_and_empty() {
+        assert!(decode_payload_value(b"").is_none());
+        assert_eq!(
+            decode_payload_value(b"84841B6FD81483746DC7390E8E44DFA4C86E1BA8\n"),
+            Some(serde_json::Value::String(
+                "84841B6FD81483746DC7390E8E44DFA4C86E1BA8\n".to_string()
+            ))
+        );
+        assert!(
+            decode_payload_value(br#"{"clientGuid":"abc"}"#)
+                .unwrap()
+                .is_object()
+        );
     }
 }

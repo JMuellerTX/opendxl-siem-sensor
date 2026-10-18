@@ -7,6 +7,44 @@ fn normalize_thumbprint(thumb: &str) -> String {
     thumb.trim().replace(':', "").to_ascii_lowercase()
 }
 
+fn normalize_identity(id: &str) -> String {
+    let head = id.trim().split(':').next().unwrap_or("");
+    head.trim_start_matches('{')
+        .trim_end_matches('}')
+        .replace(':', "")
+        .to_ascii_lowercase()
+}
+
+pub const TOPIC_CLIENT_CONNECT: &str = "/mcafee/event/dxl/clientregistry/connect";
+pub const TOPIC_CLIENT_DISCONNECT: &str = "/mcafee/event/dxl/clientregistry/disconnect";
+pub const TOPIC_SVC_REGISTER: &str = "/mcafee/event/dxl/svcregistry/register";
+pub const TOPIC_SVC_UNREGISTER: &str = "/mcafee/event/dxl/svcregistry/unregister";
+pub const TOPIC_FABRIC_CHANGE: &str = "/mcafee/event/dxl/fabricchange";
+pub const TOPIC_BROKER_STATE: &str = "/mcafee/event/dxl/brokerregistry/brokerstate";
+pub const TOPIC_REVOCATION_LIST: &str = "/mcafee/event/dxl/revocation/list";
+
+const KNOWN_BROKER_EVENT_TOPICS: &[&str] = &[
+    TOPIC_CLIENT_CONNECT,
+    TOPIC_CLIENT_DISCONNECT,
+    TOPIC_SVC_REGISTER,
+    TOPIC_SVC_UNREGISTER,
+    TOPIC_FABRIC_CHANGE,
+    TOPIC_BROKER_STATE,
+    TOPIC_REVOCATION_LIST,
+    "/mcafee/event/dxl/brokerregistry/brokerstatetopics",
+    "/mcafee/event/dxl/brokerregistry/topicadded",
+    "/mcafee/event/dxl/brokerregistry/topicremoved",
+    "/mcafee/event/dxl/eventsubscribernotfound",
+    "/mcafee/event/dxl/dumpbrokerstate",
+    "/mcafee/event/dxl/dumpservicestate",
+    "/mcafee/event/dxl/tenant/limit/exceeded",
+    "/mcafee/event/dxl/tenant/limit/reset",
+];
+
+pub fn is_known_broker_event_topic(topic: &str) -> bool {
+    KNOWN_BROKER_EVENT_TOPICS.contains(&topic)
+}
+
 pub struct DetectionEngine {
     grace_period_mins: u32,
     allowed_thumbprints: Vec<String>,
@@ -20,6 +58,7 @@ pub struct DetectionEngine {
 pub struct ServiceState {
     guid: String,
     service_type: String,
+    client_guid: Option<String>,
     registration_time_secs: i64,
     ttl_mins: u32,
     reported: bool,
@@ -43,6 +82,30 @@ impl DetectionEngine {
         }
     }
 
+    pub fn report_spoofed_broker_event(
+        &self,
+        topic: &str,
+        source_client_id: &str,
+        reason: &str,
+    ) -> OcsfEvent {
+        let now = Utc::now().timestamp_millis();
+        let metadata = OcsfMetadata::default();
+        Self::build_detection(
+            now,
+            &metadata,
+            "Spoofed Broker Event",
+            &format!(
+                "Non-broker client {} published on broker topic {} ({})",
+                source_client_id, topic, reason
+            ),
+            if source_client_id.is_empty() {
+                None
+            } else {
+                Some(source_client_id.to_string())
+            },
+        )
+    }
+
     pub fn process_event(
         &mut self,
         topic: &str,
@@ -53,10 +116,48 @@ impl DetectionEngine {
         let now = Utc::now().timestamp_millis();
         let metadata = OcsfMetadata::default();
 
+        // Guard against spoofed broker events under /mcafee/event/dxl/#
+        if topic.starts_with("/mcafee/event/dxl/") {
+            if !KNOWN_BROKER_EVENT_TOPICS.contains(&topic) {
+                alerts.push(Self::build_detection(
+                    now,
+                    &metadata,
+                    "Spoofed Broker Event",
+                    &format!(
+                        "Client {} published to unrecognized broker event topic {}",
+                        source_client_id, topic
+                    ),
+                    if source_client_id.is_empty() {
+                        None
+                    } else {
+                        Some(source_client_id.to_string())
+                    },
+                ));
+                return alerts;
+            }
+            if !self.brokers.is_empty()
+                && topic != TOPIC_BROKER_STATE
+                && !source_client_id.is_empty()
+                && !self.brokers.contains_key(source_client_id)
+            {
+                alerts.push(Self::build_detection(
+                    now,
+                    &metadata,
+                    "Spoofed Broker Event",
+                    &format!(
+                        "Non-broker client {} attempted to publish broker event on {}",
+                        source_client_id, topic
+                    ),
+                    Some(source_client_id.to_string()),
+                ));
+                return alerts;
+            }
+        }
+
         // (b) Unknown Thumbprint
         if !self.allowed_thumbprints.is_empty() {
             // Check Connect events
-            if topic.ends_with("/connect")
+            if topic == TOPIC_CLIENT_CONNECT
                 && let Some(cert_str) = payload
                     .get("certThumbprint")
                     .and_then(|v| v.as_str())
@@ -98,7 +199,7 @@ impl DetectionEngine {
                 }
             }
 
-            if topic.ends_with("/register")
+            if topic == TOPIC_SVC_REGISTER
                 && let Some(certs) = payload.get("certificates").and_then(|v| v.as_array())
             {
                 for cert in certs {
@@ -122,7 +223,7 @@ impl DetectionEngine {
         }
 
         // (f) Legacy Cipher Suite
-        if topic.ends_with("/connect")
+        if topic == TOPIC_CLIENT_CONNECT
             && let Some(cipher) = payload.get("cipher").and_then(|v| v.as_str())
             && cipher.starts_with("TLS_RSA_")
             && !cipher.contains("ECDHE")
@@ -145,26 +246,48 @@ impl DetectionEngine {
             ));
         }
 
-        // Track for TTL (a)
-        if topic.ends_with("/register") {
+        // Track for TTL (a) & Service Hijacking protection
+        if topic == TOPIC_SVC_REGISTER {
             if let (Some(guid), Some(svc_type), Some(ttl), Some(reg_time)) = (
                 payload.get("serviceGuid").and_then(|v| v.as_str()),
                 payload.get("serviceType").and_then(|v| v.as_str()),
                 payload.get("ttlMins").and_then(|v| v.as_u64()),
                 payload.get("registrationTime").and_then(|v| v.as_i64()),
             ) {
+                let new_owner = payload
+                    .get("clientGuid")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                if let (Some(existing), Some(new_client)) =
+                    (self.services.get(guid), new_owner.as_deref())
+                    && let Some(old_client) = existing.client_guid.as_deref()
+                    && normalize_identity(old_client) != normalize_identity(new_client)
+                {
+                    alerts.push(Self::build_detection(
+                        now,
+                        &metadata,
+                        "Service Hijack Attempt",
+                        &format!(
+                            "Service {} ({}) registered by client {} was previously owned by {}",
+                            guid, svc_type, new_client, old_client
+                        ),
+                        Some(new_client.to_string()),
+                    ));
+                }
                 self.services.insert(
                     guid.to_string(),
                     ServiceState {
                         guid: guid.to_string(),
                         service_type: svc_type.to_string(),
+                        client_guid: new_owner,
                         registration_time_secs: reg_time,
                         ttl_mins: ttl as u32,
                         reported: false,
                     },
                 );
             }
-        } else if topic.ends_with("/unregister")
+        } else if topic == TOPIC_SVC_UNREGISTER
             && let Some(guid) = payload.get("serviceGuid").and_then(|v| v.as_str())
             && let Some(state) = self.services.remove(guid)
         {
@@ -187,6 +310,52 @@ impl DetectionEngine {
                     ),
                     None,
                 ));
+            }
+        }
+
+        // Certificate Revocation List event monitoring
+        if topic == TOPIC_REVOCATION_LIST
+            && let Some(raw_list) = payload.as_str()
+        {
+            for line in raw_list.lines() {
+                let cert = normalize_thumbprint(line);
+                if !cert.is_empty() {
+                    alerts.push(Self::build_detection(
+                        now,
+                        &metadata,
+                        "Certificate Revoked",
+                        &format!("Certificate thumbprint revoked on fabric: {}", cert),
+                        Some(cert),
+                    ));
+                }
+            }
+        }
+
+        // Payload vs Envelope Identity Mismatch (Framing protection on non-broker topics)
+        if !topic.starts_with("/mcafee/event/dxl/")
+            && !source_client_id.is_empty()
+            && !self.brokers.contains_key(source_client_id)
+        {
+            let sender_norm = normalize_identity(source_client_id);
+            for field in ["agentGuid", "clientGuid", "certThumbprint"] {
+                if let Some(claimed) = payload.get(field).and_then(|v| v.as_str()) {
+                    let claimed_norm = normalize_identity(claimed);
+                    if !claimed_norm.is_empty()
+                        && !sender_norm.is_empty()
+                        && claimed_norm != sender_norm
+                    {
+                        alerts.push(Self::build_detection(
+                            now,
+                            &metadata,
+                            "Payload Identity Spoofing",
+                            &format!(
+                                "Client {} published on {} claiming {}={}",
+                                source_client_id, topic, field, claimed
+                            ),
+                            Some(source_client_id.to_string()),
+                        ));
+                    }
+                }
             }
         }
 
@@ -225,7 +394,7 @@ impl DetectionEngine {
         );
 
         // (e) Fabric Change
-        if topic.contains("fabricchange") {
+        if topic == TOPIC_FABRIC_CHANGE {
             alerts.push(Self::build_detection(
                 now,
                 &metadata,
@@ -233,7 +402,7 @@ impl DetectionEngine {
                 "A fabric topology change or broker state change was detected.",
                 None,
             ));
-        } else if topic.contains("brokerregistry/brokerstate") {
+        } else if topic == TOPIC_BROKER_STATE {
             let changed = if let Some(guid) = payload.get("guid").and_then(|v| v.as_str()) {
                 let prev = self.brokers.insert(guid.to_string(), payload.clone());
                 match prev {
@@ -390,12 +559,18 @@ impl DetectionEngine {
                     svc_info.get("ttlMins").and_then(|v| v.as_u64()),
                     svc_info.get("registrationTime").and_then(|v| v.as_i64()),
                 ) {
+                    let client_guid = svc_info
+                        .get("clientGuid")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
                     seen.insert(guid.to_string());
                     self.services.insert(
                         guid.to_string(),
                         ServiceState {
                             guid: guid.to_string(),
                             service_type: svc_type.to_string(),
+                            client_guid,
                             registration_time_secs: reg_time,
                             ttl_mins: ttl as u32,
                             reported: false,
@@ -801,5 +976,156 @@ mod tests {
         let _ = engine.poll_timeouts_at(future_secs);
         assert!(engine.client_rates.is_empty());
         assert!(engine.topic_rates.is_empty());
+    }
+
+    #[test]
+    fn test_spoofed_broker_subtopic_does_not_frame_victim_and_flags_attacker() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let spoof_payload = json!({
+            "certThumbprint": "victim_thumbprint",
+            "cipher": "TLS_RSA_WITH_AES_128_CBC_SHA"
+        });
+
+        // 1. Sub-topic under /mcafee/event/dxl/ that is not a real broker event topic
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/spoof/connect",
+            &spoof_payload,
+            "allowed_hash",
+        );
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Spoofed Broker Event");
+            assert_eq!(df.suser.as_deref(), Some("allowed_hash"));
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+
+        // 2. Non-broker topic ending with /connect must NOT be parsed as a broker connect event,
+        // and because certThumbprint != sender ("allowed_hash"), it flags Payload Identity Spoofing
+        // against "allowed_hash" instead of framing "victim_thumbprint".
+        let alerts = engine.process_event("/custom/app/connect", &spoof_payload, "allowed_hash");
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Payload Identity Spoofing");
+            assert_eq!(df.suser.as_deref(), Some("allowed_hash"));
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+    }
+
+    #[test]
+    fn test_non_broker_publishing_to_broker_topic_after_sync_is_flagged() {
+        let mut engine = DetectionEngine::new(&test_config());
+        engine.process_broker_sync_response(&json!({
+            "brokers": {
+                "{broker-1}": { "guid": "{broker-1}" }
+            }
+        }));
+
+        let spoof_payload = json!({
+            "certThumbprint": "victim_thumbprint",
+            "cipher": "TLS_RSA_WITH_AES_128_CBC_SHA"
+        });
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/clientregistry/connect",
+            &spoof_payload,
+            "allowed_hash",
+        );
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Spoofed Broker Event");
+            assert_eq!(df.suser.as_deref(), Some("allowed_hash"));
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+    }
+
+    #[test]
+    fn test_service_hijack_attempt_detected() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let now_secs = Utc::now().timestamp();
+
+        let legit_reg = json!({
+            "serviceGuid": "{epo-service-guid}",
+            "serviceType": "/mcafee/service/epo/remote",
+            "clientGuid": "allowed_hash",
+            "ttlMins": 60,
+            "registrationTime": now_secs
+        });
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/svcregistry/register",
+            &legit_reg,
+            "{broker-1}",
+        );
+        assert!(alerts.is_empty());
+
+        // Another client registers the exact same serviceGuid
+        let hijack_reg = json!({
+            "serviceGuid": "{epo-service-guid}",
+            "serviceType": "/mcafee/service/epo/remote",
+            "clientGuid": "attacker_client_guid",
+            "ttlMins": 60,
+            "registrationTime": now_secs + 5
+        });
+        let alerts = engine.process_event(
+            "/mcafee/event/dxl/svcregistry/register",
+            &hijack_reg,
+            "{broker-1}",
+        );
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Service Hijack Attempt");
+            assert_eq!(df.suser.as_deref(), Some("attacker_client_guid"));
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+    }
+
+    #[test]
+    fn test_certificate_revocation_list_event_detected() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let payload = json!("84841B6FD81483746DC7390E8E44DFA4C86E1BA8\n");
+        let alerts =
+            engine.process_event("/mcafee/event/dxl/revocation/list", &payload, "{broker-1}");
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Certificate Revoked");
+            assert_eq!(
+                df.suser.as_deref(),
+                Some("84841b6fd81483746dc7390e8e44dfa4c86e1ba8")
+            );
+        } else {
+            panic!("Expected DetectionFinding");
+        }
+    }
+
+    #[test]
+    fn test_payload_identity_spoofing_on_tie_detection_topic() {
+        let mut engine = DetectionEngine::new(&test_config());
+        let fake_tie_detection = json!({
+            "agentGuid": "{68125cd6-a5d8-11e6-348e-000c29663178}",
+            "detectionTime": 1481301038,
+            "localReputation": 1,
+            "name": "RANSOMWARE.EXE",
+            "remediationAction": 5
+        });
+
+        let alerts = engine.process_event(
+            "/mcafee/event/tie/file/detection",
+            &fake_tie_detection,
+            "allowed_hash",
+        );
+        assert_eq!(alerts.len(), 1);
+        if let OcsfEvent::DetectionFinding(df) = &alerts[0] {
+            assert_eq!(df.finding_info.title, "Payload Identity Spoofing");
+            assert_eq!(df.suser.as_deref(), Some("allowed_hash"));
+            assert!(
+                df.finding_info
+                    .desc
+                    .contains("{68125cd6-a5d8-11e6-348e-000c29663178}")
+            );
+        } else {
+            panic!("Expected DetectionFinding");
+        }
     }
 }
