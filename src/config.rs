@@ -167,19 +167,24 @@ impl DxlConfig {
         let cert_file = resolve_path(get_ci(certs, "CertFile").ok_or("Missing CertFile")?);
         let private_key = resolve_path(get_ci(certs, "PrivateKey").ok_or("Missing PrivateKey")?);
 
-        let general = section_ci(&conf, "General").ok_or("Missing [General] section")?;
-        let client_id = get_ci(general, "ClientId")
+        let general = section_ci(&conf, "General");
+        let client_id = general
+            .and_then(|g| get_ci(g, "ClientId"))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("{{{}}}", uuid::Uuid::new_v4().to_string().to_lowercase()));
-        let tls_min_version = get_ci(general, "TlsMinVersion")
+        let tls_min_version = general
+            .and_then(|g| get_ci(g, "TlsMinVersion"))
             .unwrap_or("1.2")
             .trim()
             .to_string();
-        let verify_hostname = get_ci(general, "VerifyHostname")
+        let verify_hostname = general
+            .and_then(|g| get_ci(g, "VerifyHostname"))
             .map(parse_bool)
             .unwrap_or(false); // Off by default: broker certificates on real fabrics carry no matching SAN
-        let tls_ciphers = get_ci(general, "TlsCiphers").map(|s| s.to_string());
+        let tls_ciphers = general
+            .and_then(|g| get_ci(g, "TlsCiphers"))
+            .map(|s| s.to_string());
 
         let brokers_sec = section_ci(&conf, "Brokers").ok_or("Missing [Brokers] section")?;
         let mut brokers = Vec::new();
@@ -388,5 +393,27 @@ mod tests {
                 ip: "broker3.local".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn test_load_config_without_general_section() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "[Certs]").unwrap();
+        writeln!(file, "BrokerCertChain=ca-bundle.crt").unwrap();
+        writeln!(file, "CertFile=client.crt").unwrap();
+        writeln!(file, "PrivateKey=client.key").unwrap();
+        writeln!(file, "[Brokers]").unwrap();
+        writeln!(
+            file,
+            "{{4b966d1c-a7b8-11f1-2e8a-00155db21504}}={{4b966d1c-a7b8-11f1-2e8a-00155db21504}};8883;JMLLER-2025.renrakumm.de;192.168.1.85"
+        )
+        .unwrap();
+
+        let config = DxlConfig::load(file.path()).unwrap();
+        assert!(config.client_id.starts_with('{') && config.client_id.ends_with('}'));
+        assert!(!config.verify_hostname);
+        assert_eq!(config.tls_min_version, "1.2");
+        assert_eq!(config.brokers.len(), 1);
+        assert_eq!(config.brokers[0].ip, "192.168.1.85");
     }
 }

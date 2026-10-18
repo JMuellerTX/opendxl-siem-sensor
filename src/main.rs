@@ -72,13 +72,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(2);
     });
-    let Some(broker) = config.brokers.first() else {
+    if config.brokers.is_empty() {
         eprintln!(
             "Error: {} lists no brokers in its [Brokers] section.",
             config_path
         );
         std::process::exit(2);
-    };
+    }
+    let (broker_target, broker_port) =
+        select_broker_endpoint(&config.brokers, config.verify_hostname).await;
 
     // Exit code 2, the same as a configuration that cannot be read: a wrong
     // path or an unreadable certificate is a configuration problem, and the
@@ -86,8 +88,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // someone who is looking at a provisioning directory, not at this source.
     let mut mqttoptions = build_mqtt_options(
         &config.client_id,
-        &broker.ip,
-        broker.port,
+        &broker_target,
+        broker_port,
         &config.broker_cert_chain,
         &config.cert_file,
         &config.private_key,
@@ -108,8 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut detection_engine = DetectionEngine::new(&config);
 
     let reply_to_topic = format!("/mcafee/client/{}", config.client_id);
-    let (mut svc_query_msg_id, mut broker_query_msg_id) =
-        subscribe_and_sync(&client, &config, &reply_to_topic).await?;
+    let mut svc_query_msg_id = String::new();
+    let mut broker_query_msg_id = String::new();
 
     let mut last_poll = Utc::now().timestamp();
 
@@ -177,19 +179,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         detection_engine.brokers.len()
                                     );
                                 }
-                            } else if publish.topic == reply_to_topic
-                                && msg.message_type == dxl::MESSAGE_TYPE_ERROR
-                            {
-                                error!(
-                                    "Received error response on reply topic (code={:?}): {:?}",
-                                    msg.error_code, msg.error_message
-                                );
+                            } else if publish.topic == reply_to_topic {
+                                if msg.message_type == dxl::MESSAGE_TYPE_ERROR {
+                                    error!(
+                                        "Received error response on reply topic (code={:?}): {:?}",
+                                        msg.error_code, msg.error_message
+                                    );
+                                }
                             } else {
                                 let value = payload_json.unwrap_or(serde_json::Value::Null);
+                                let publisher_id = msg
+                                    .other_fields
+                                    .get("dxl.certs")
+                                    .and_then(|certs| {
+                                        certs.split(';').map(str::trim).rfind(|s| !s.is_empty())
+                                    })
+                                    .unwrap_or(&msg.source_client_id);
                                 let alerts = detection_engine.process_event(
                                     &publish.topic,
                                     &value,
-                                    &msg.source_client_id,
+                                    publisher_id,
                                 );
                                 for alert in alerts {
                                     dispatch_record(
@@ -246,6 +255,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_poll = now;
         }
     }
+}
+
+async fn select_broker_endpoint(
+    brokers: &[config::Broker],
+    verify_hostname: bool,
+) -> (String, u16) {
+    let mut candidates: Vec<(String, u16)> = Vec::new();
+    for b in brokers {
+        let primary = if verify_hostname { &b.host } else { &b.ip };
+        let secondary = if verify_hostname { &b.ip } else { &b.host };
+        for raw in [primary, secondary] {
+            let clean = raw.trim().trim_start_matches('[').trim_end_matches(']');
+            if !clean.is_empty() {
+                let pair = (clean.to_string(), b.port);
+                if !candidates.contains(&pair) {
+                    candidates.push(pair);
+                }
+            }
+        }
+    }
+    if candidates.len() <= 1 {
+        return candidates
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| ("127.0.0.1".to_string(), 8883));
+    }
+    for (host, port) in &candidates {
+        if let Ok(Ok(_)) = tokio::time::timeout(
+            Duration::from_millis(1500),
+            tokio::net::TcpStream::connect((host.as_str(), *port)),
+        )
+        .await
+        {
+            info!("Selected reachable broker {}:{}", host, port);
+            return (host.clone(), *port);
+        }
+    }
+    candidates.into_iter().next().unwrap()
 }
 
 async fn subscribe_and_sync(
@@ -325,9 +372,6 @@ async fn dispatch_record(
     http_tx: &Option<tokio::sync::mpsc::Sender<OcsfEvent>>,
     kafka_tx: &Option<tokio::sync::mpsc::Sender<OcsfEvent>>,
 ) {
-    if !cli.wants(kind) {
-        return;
-    }
     let cef_str = format_cef(&record);
     emit(cli, &record, &cef_str, kind);
     if let Some(tx) = syslog_tx {
