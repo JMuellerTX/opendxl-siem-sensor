@@ -113,6 +113,22 @@ Triggered when a specific client publishes more than 100 messages per minute.
 Triggered when a specific topic receives more than 100 messages per minute.
 > `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Topic Rate Anomaly|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=High rate detected for /some/normal/topic`
 
+**8. Spoofed Broker Event**
+Triggered when a non-broker client publishes to `/mcafee/event/dxl/#` (detected via client `dxl.certs` in the envelope, a non-broker `source_client_id`, or an unrecognized `/mcafee/event/dxl/*` sub-topic). Spoofed broker events are rejected before normalization so they cannot frame another client's thumbprint.
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Spoofed Broker Event|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=Non-broker client 5a752ed6a24f6d2dd77634b0c68dd729b48d4613 published on broker topic /mcafee/event/dxl/clientregistry/connect (envelope contains client dxl.certs) suser=5a752ed6a24f6d2dd77634b0c68dd729b48d4613`
+
+**9. Service Hijack Attempt**
+Triggered when a service registration (`svcregistry/register`) re-registers an existing `serviceGuid` under a different `clientGuid`.
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Service Hijack Attempt|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=Service {epo-service-guid} (/mcafee/service/epo/remote) registered by client attacker_client_guid was previously owned by allowed_hash suser=attacker_client_guid`
+
+**10. Certificate Revoked**
+Triggered when a certificate thumbprint is published on `/mcafee/event/dxl/revocation/list`.
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Certificate Revoked|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=Certificate thumbprint revoked on fabric: 84841b6fd81483746dc7390e8e44dfa4c86e1ba8 suser=84841b6fd81483746dc7390e8e44dfa4c86e1ba8`
+
+**11. Payload Identity Spoofing**
+Triggered when a message on a non-broker topic carries an `agentGuid`, `clientGuid`, or `certThumbprint` in its JSON payload that does not match the envelope publisher (`source_client_id` / `dxl.certs`), preventing false-flag framing on topics such as `/mcafee/event/tie/file/detection`.
+> `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|2004|Payload Identity Spoofing|4|deviceCustomNumber1=200401 deviceCustomNumber1Label=type_uid msg=Client 5a752ed6a24f6d2dd77634b0c68dd729b48d4613 published on /mcafee/event/tie/file/detection claiming agentGuid={68125cd6-a5d8-11e6-348e-000c29663178} suser=5a752ed6a24f6d2dd77634b0c68dd729b48d4613`
+
 In addition to detections, regular audit events are logged, e.g., Network Connect:
 > `CEF:0|OpenDXL|opendxl-siem-sensor|1.0|4001|Connect|1|app=mqtt deviceCustomNumber1=400101 deviceCustomNumber1Label=type_uid deviceCustomString1=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString1Label=client_guid deviceCustomString2=TLSv1.3 deviceCustomString2Label=tls_version deviceCustomString3=TLS_AES_256_GCM_SHA384 deviceCustomString3Label=cipher deviceCustomString4=5a752ed6a24f6d2dd77634b0c68dd729b48d4613 deviceCustomString4Label=cert_thumbprint src=172.17.0.1`
 
